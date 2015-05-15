@@ -111,5 +111,45 @@ requestVoteResponse :: ( ProcessId -- ^ Sender's process id
 requestVoteResponse (sender, seqno, term, voteGranted) = say "DUMMY"
 
 
-initRaft :: Backend -> [LocalNode] -> Process ()
-initRaft backend nodes = return ()
+-- | For testing.
+echo :: (ProcessId, String) -> Process ()
+echo (sender, msg) = do
+    self <- getSelfPid
+    say $ show self ++ " recv " ++ show sender ++ ": " ++ msg
+    send sender msg
+
+logMessage :: String -> Process ()
+logMessage msg = say $ "Handling: " ++ msg
+
+-- | Starts up Raft on the node.
+initRaft :: Backend                -- ^ Backend that the cluster is running on
+         -> [LocalNode]            -- ^ Nodes on the topology
+         -> Process ()
+initRaft backend nodes = do
+    -- Hello world!
+    say "Yo, I'm alive!"
+    
+    -- Start process for handling messages
+    serverPid <- spawnLocal . forever $ do
+        receiveWait [ match logMessage
+                    , match echo]
+    -- Register pid in the registry under the handle "server"
+    register "server" serverPid
+    
+    mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
+
+   
+    liftIO $ threadDelay 1000000
+    return ()
+   --
+   -- forever $ return ()
+        --mapM_ (\x -> nsendRemote x "master" (self, "echo")) nodeIds
+
+-- Start up server thread
+-- register server thread with local registry
+-- test echo reply
+
+
+
+
+
