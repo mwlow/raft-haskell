@@ -18,6 +18,7 @@ import Control.Concurrent
 import Control.Monad 
 import Control.Applicative
 import Control.Distributed.Process
+import Control.Distributed.Process.Extras (isProcessAlive)
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process.Serializable
@@ -26,6 +27,7 @@ import Data.Binary
 import Data.Typeable
 import Data.List
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import GHC.Generics (Generic)
 
 -- | Type renaming to make things clearer.
@@ -42,7 +44,7 @@ newtype Command a = Command a deriving (Show, Read, Eq, Typeable)
 
 instance (Binary a) => Binary (Command a) where
     put (Command a) = put a
-    get = get >>= \a -> return (Command a)
+    get = Command <$> get
 
 -- | An entry in a log, clearly. Also serializable.
 data LogEntry a = LogEntry 
@@ -54,12 +56,7 @@ data LogEntry a = LogEntry
 
 instance (Binary a) => Binary (LogEntry a) where
     put (LogEntry a b c d) = put a >> put b >> put c >> put d
-    get = do
-        a <- get
-        b <- get
-        c <- get
-        d <- get
-        return $ LogEntry a b c d
+    get = LogEntry <$> get <*> get <*> get <*> get 
 
 -- | Data structure for appendEntriesRPC. Is serializable.
 data AppendEntriesMsg a = AppendEntriesMsg 
@@ -76,16 +73,8 @@ data AppendEntriesMsg a = AppendEntriesMsg
 instance (Binary a) => Binary (AppendEntriesMsg a) where
     put (AppendEntriesMsg a b c d e f g i) =
         put a >> put b >> put c >> put d >> put e >> put f >> put g >> put i
-    get = do
-        a <- get
-        b <- get
-        c <- get
-        d <- get
-        e <- get
-        f <- get
-        g <- get
-        i <- get
-        return $ AppendEntriesMsg a b c d e f g i
+    get = AppendEntriesMsg <$> get <*> get <*> get <*> get <*> get <*> get
+                           <*> get <*> get
 
 -- | Data structure for the response to appendEntriesRPC. Is serializable.
 data AppendEntriesResponseMsg = AppendEntriesResponseMsg 
@@ -97,12 +86,7 @@ data AppendEntriesResponseMsg = AppendEntriesResponseMsg
 
 instance Binary AppendEntriesResponseMsg where
     put (AppendEntriesResponseMsg a b c d) = put a >> put b >> put c >> put d
-    get = do
-        a <- get
-        b <- get
-        c <- get
-        d <- get
-        return $ AppendEntriesResponseMsg a b c d
+    get = AppendEntriesResponseMsg <$> get <*> get <*> get <*> get
 
 -- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
@@ -117,14 +101,7 @@ data RequestVoteMsg = RequestVoteMsg
 instance Binary RequestVoteMsg where
     put (RequestVoteMsg a b c d e f) = 
         put a >> put b >> put c >> put d >> put e >> put f
-    get = do
-        a <- get
-        b <- get
-        c <- get
-        d <- get
-        e <- get
-        f <- get
-        return $ RequestVoteMsg a b c d e f
+    get = RequestVoteMsg <$> get <*> get <*> get <*> get <*> get <*> get
 
 -- | Data structure for the response to requestVoteRPC. Is serializable.
 data RequestVoteResponseMsg = RequestVoteResponseMsg
@@ -137,12 +114,7 @@ data RequestVoteResponseMsg = RequestVoteResponseMsg
 instance Binary RequestVoteResponseMsg where
     put (RequestVoteResponseMsg a b c d) =
         put a >> put b >> put c >> put d
-    get = do
-        a <- get
-        b <- get
-        c <- get
-        d <- get
-        return $ RequestVoteResponseMsg a b c d
+    get = RequestVoteResponseMsg <$> get <*> get <*> get <*> get
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
 data RpcMessage a
@@ -166,16 +138,16 @@ recvEcho (pid, a) = send pid a >> return RpcNothing
 recvWhereIsReply :: WhereIsReply -> Process (RpcMessage a)
 recvWhereIsReply a = return $ RpcWhereIsReply a
 
-recvMonitorRef :: MonitorRef -> Process (RpcMessage a)
-recvMonitorRef a = return $ RpcMonitorRef a
+recvProcessMonitorNotification :: ProcessMonitorNotification 
+                               -> Process (RpcMessage a)
+recvProcessMonitorNotification a = return $ RpcProcessMonitorNotification a
 
 
 -- | This is the process's local view of the entire cluster
 data ClusterState = ClusterState 
-    { backend        :: Backend         -- ^ Backend for the topology
-    , nodes          :: [LocalNode]     -- ^ List of nodes in the topology
-    , nodeIds        :: Set.Set NodeId  -- ^ Set of nodeIds
-    , activeNodeIds  :: Set.Set NodeId  -- ^ Nodes with an active process
+    { backend      :: Backend                    -- ^ Backend for the topology
+    , nodes        :: [LocalNode]                -- ^ List of nodes in the topology
+    , processMap   :: Map.Map NodeId ProcessId   -- ^ Map of currently known processIds
     }
 
 -- | This is the node's local state.
@@ -189,8 +161,8 @@ raftLoop pid
          clusterState@(ClusterState backend nodes nodeIds activeNodeIds) 
          nodeState@(NodeState gen) = do
 
-    -- Link to parent so that if we kill the parent we stop as well
-    link pid
+    -- Die when parent does    
+    link pid 
 
     -- Randomly send out probe to discover processes
     let inactiveNodeIds = nodeIds Set.\\ activeNodeIds
@@ -198,13 +170,11 @@ raftLoop pid
     when (Set.size inactiveNodeIds > 0) $ 
         whereisRemoteAsync (Set.elemAt rand inactiveNodeIds) "server"
 
-    say $ "size is : " ++ show (Set.size inactiveNodeIds)
-    
     -- Handle messages. Use timeout to ensure frequent probing.
     msg <- receiveTimeout 250000 [ match recvSay
                                  , match recvEcho
+                                 , match recvProcessMonitorNotification
                                  , match recvWhereIsReply
-                                 , match recvMonitorRef
                                  ]
 
     case msg of
@@ -214,24 +184,23 @@ raftLoop pid
         Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
         _ -> raftLoop pid clusterState nodeState
   where
-    -- If we get WhereIsReply, monitor the process
+    -- If we get WhereIsReply, attempt to monitor
     handleWhereIsReply :: WhereIsReply -> Process ()
     handleWhereIsReply (WhereIsReply _ (Just pid)) = do
         let newActiveNodeIds = Set.insert (processNodeId pid) activeNodeIds
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
-        monitor pid -- Set monitor
-        say "whereis received!"
+        monitor pid   -- Set monitor
+        status <- isProcessAlive pid
         raftLoop pid newClusterState nodeState
     handleWhereIsReply _ = raftLoop pid clusterState nodeState
 
     -- If we get a monitor notification, process has become unreachable
+    -- Note: Monitor notifications do not seem to be working properly
     handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
     handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
         let newActiveNodeIds = Set.delete (processNodeId p) activeNodeIds
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
-        unmonitor r  -- Unset monitor
-        reconnect p  -- Set reconnect flag
-        raftLoop pid newClusterState nodeState
+        unmonitor r >> reconnect p >> raftLoop pid newClusterState nodeState
 
 
 -- | Starts up Raft on the node.
@@ -255,6 +224,10 @@ initRaft backend nodes = do
         Nothing -> register "server" serverPid
         _ -> reregister "server" serverPid
     
+--    rand <- liftIO $ (uniformR (0, 5000000) gen :: IO Int)
+ --   liftIO $ threadDelay rand 
+  -----  exit serverPid "kill"
+
     mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
     --mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
 --    mapM_ (\x -> nsendRemote x "server" "abcd") (localNodeId <$> nodes)
