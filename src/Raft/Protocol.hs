@@ -98,7 +98,6 @@ instance Binary AppendEntriesResponseMsg where
         d <- get
         return $ AppendEntriesResponseMsg a b c d
 
-
 data RequestVoteMsg = RequestVoteMsg
     { rvSender      :: ProcessId  -- ^ Sender's process id
     , rvSeqno       :: Int        -- ^ Sequence number, for matching replies
@@ -108,12 +107,34 @@ data RequestVoteMsg = RequestVoteMsg
     , lastLogTerm   :: Term       -- ^ Term of candidate's last log entry
     } deriving (Show, Eq, Typeable)
 
+instance Binary RequestVoteMsg where
+    put (RequestVoteMsg a b c d e f) = 
+        put a >> put b >> put c >> put d >> put e >> put f
+    get = do
+        a <- get
+        b <- get
+        c <- get
+        d <- get
+        e <- get
+        f <- get
+        return $ RequestVoteMsg a b c d e f
+
 data RequestVoteResponseMsg = RequestVoteResponseMsg
     { rvrSender     :: ProcessId  -- ^ Sender's process id
     , rvrSeqno      :: Int        -- ^ Sequence number, for matching replies
     , rvrTerm       :: Term       -- ^ Current term to update leader
     , voteGranted   :: Bool       -- ^ Did candidate receive vote?
     } deriving (Show, Eq, Typeable)
+
+instance Binary RequestVoteResponseMsg where
+    put (RequestVoteResponseMsg a b c d) =
+        put a >> put b >> put c >> put d
+    get = do
+        a <- get
+        b <- get
+        c <- get
+        d <- get
+        return $ RequestVoteResponseMsg a b c d
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
 data RpcMessage = RPCString String | RPCInt Int
