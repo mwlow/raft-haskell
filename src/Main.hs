@@ -34,11 +34,11 @@ cntrlc tid nodes = do
 
 -- | Initialize the cluster.
 initCluster :: String -> String -> Int -> IO ()
-initCluster host port numServers = do
+initCluster host port numNodes = do
     -- Initialize backend and then start all the nodes
-    color Cyan $ printf "%s %d %s\n" "==> Starting up" numServers "nodes"
+    color Cyan $ printf "%s %d %s\n" "==> Starting up" numNodes "nodes"
     backend <- initializeBackend host port initRemoteTable
-    nodes <- replicateM numServers $ newLocalNode backend
+    nodes <- replicateM numNodes $ newLocalNode backend
     tid <- myThreadId
     installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
 
@@ -48,9 +48,9 @@ initCluster host port numServers = do
     -- Find and count peers
     count <- liftM length $ findPeers backend 1000000 >>= mapM print
     putStr "Nodes detected: "
-    if count == numServers
-        then color Green $ printf "%d%s%d\n" count "/" numServers
-        else color Red $ printf "%d%s%d\n" count "/" numServers
+    if count == numNodes
+        then color Green $ printf "%d%s%d\n" count "/" numNodes
+        else color Red $ printf "%d%s%d\n" count "/" numNodes
 
     -- Run Raft on all of the nodes
     threadDelay 500000
@@ -72,18 +72,19 @@ initCluster host port numServers = do
 main :: IO ()
 main = do
     -- Set buffering mode for reading in user input
-    hSetBuffering stdout LineBuffering
     hSetBuffering stdin NoBuffering
+    hSetBuffering stdout LineBuffering
+    hSetBuffering stderr LineBuffering
 
     -- Parse command line arguments
     args <- getArgs
     case args of
-        [host, port, numServers] ->
-            case readMaybe numServers of
-                Nothing -> putStrLn "usage: raft host port numServers"
+        [host, port, numNodes] ->
+            case readMaybe numNodes of
+                Nothing -> putStrLn "usage: raft host port numNodes"
                 -- Start the cluster
                 Just n -> initCluster host port n
-        _ -> putStrLn "usage: raft host port numServers"
+        _ -> putStrLn "usage: raft host port numNodes"
 
 
 

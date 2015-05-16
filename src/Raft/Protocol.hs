@@ -1,6 +1,9 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
+--Notes: use txt file as state-machine? Therefore we can write a second program
+--to visualize the log files/txt files in real time.
+--Handle rewriting pids to registry (especially when first starting up)
 module Raft.Protocol 
 ( initRaft
 )
@@ -8,6 +11,7 @@ where
 
 import System.Environment
 import System.Console.ANSI
+import System.Random.MWC
 import System.Exit
 import System.Posix.Signals
 import Control.Concurrent 
@@ -20,8 +24,9 @@ import Control.Distributed.Process.Serializable
 import Text.Printf
 import Data.Binary
 import Data.Typeable
+import Data.List
+import qualified Data.Set as Set
 import GHC.Generics (Generic)
-import qualified Data.Map as Map
 
 -- | Type renaming to make things clearer.
 type Term = Int
@@ -56,7 +61,7 @@ instance (Binary a) => Binary (LogEntry a) where
         d <- get
         return $ LogEntry a b c d
 
--- 
+-- | Data structure for appendEntriesRPC. Is serializable.
 data AppendEntriesMsg a = AppendEntriesMsg 
     { aeSender       :: ProcessId -- ^ Sender's process id
     , aeSeqno        :: Int       -- ^ Sequence number, for matching replies
@@ -82,6 +87,7 @@ instance (Binary a) => Binary (AppendEntriesMsg a) where
         i <- get
         return $ AppendEntriesMsg a b c d e f g i
 
+-- | Data structure for the response to appendEntriesRPC. Is serializable.
 data AppendEntriesResponseMsg = AppendEntriesResponseMsg 
     { aerSender   :: ProcessId  -- ^ Sender's process id
     , aerSeqno    :: Int        -- ^ Sequence number, for matching replies
@@ -98,6 +104,7 @@ instance Binary AppendEntriesResponseMsg where
         d <- get
         return $ AppendEntriesResponseMsg a b c d
 
+-- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
     { rvSender      :: ProcessId  -- ^ Sender's process id
     , rvSeqno       :: Int        -- ^ Sequence number, for matching replies
@@ -119,6 +126,7 @@ instance Binary RequestVoteMsg where
         f <- get
         return $ RequestVoteMsg a b c d e f
 
+-- | Data structure for the response to requestVoteRPC. Is serializable.
 data RequestVoteResponseMsg = RequestVoteResponseMsg
     { rvrSender     :: ProcessId  -- ^ Sender's process id
     , rvrSeqno      :: Int        -- ^ Sequence number, for matching replies
@@ -137,14 +145,15 @@ instance Binary RequestVoteResponseMsg where
         return $ RequestVoteResponseMsg a b c d
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
-data RpcMessage = RPCString String | RPCInt Int
-
--- | Handle whereisRemoteAsync queries. Raft node failures will be 
--- simulated by processes that shut down and don't respond. Returns a monitor.
-whereisRemoteAsyncHandler :: WhereIsReply -> Process (Maybe MonitorRef) 
-whereisRemoteAsyncHandler (WhereIsReply _ (Just pid)) = 
-    monitor pid >>= \m -> return (Just m)
-whereisRemoteAsyncHandler _ = return Nothing
+data RpcMessage a
+    = RpcString String                  
+    | RpcWhereIsReply WhereIsReply      
+    | RpcMonitorRef MonitorRef        
+    | RpcProcessMonitorNotification ProcessMonitorNotification
+    | RpcAppendEntriesMsg (AppendEntriesMsg a)
+    | RpcAppendEntriesResponseMsg AppendEntriesResponseMsg
+    | RpcRequestVoteMsg RequestVoteMsg
+    | RpcRequestVoteResponseMsg RequestVoteResponseMsg
 
 -- | Echo handling for testing.
 echo :: (ProcessId, String) -> Process ()
@@ -153,43 +162,91 @@ echo (sender, msg) = do
     say $ show self ++ " recv " ++ show sender ++ ": " ++ msg
     send sender msg
 
-logMessage :: String -> Process ()
-logMessage msg = say $ "Handling: " ++ msg
+logMessage :: String -> Process String
+logMessage msg = return msg
+
+-- | These wrapping functions simply return the message in an RPCMsg type.
+recvWhereIsReply :: WhereIsReply -> Process (RpcMessage a)
+recvWhereIsReply a = return $ RpcWhereIsReply a
+
+recvMonitorRef :: MonitorRef -> Process (RpcMessage a)
+recvMonitorRef a = return $ RpcMonitorRef a
 
 
+-- | This is the process's local view of the entire cluster
+data ClusterState = ClusterState 
+    { backend        :: Backend      -- ^ Backend for the topology
+    , nodes          :: [LocalNode]  -- ^ List of nodes in the topology
+    , nodeIds        :: Set.Set NodeId   -- ^ Set of nodeIds
+    , activeNodeIds  :: Set.Set NodeId   -- ^ Nodes with an active process
+    }
+
+-- | This is the node's local state.
+data NodeState = NodeState
+    { gen         :: GenIO
+    }
 
 -- | This is the main process for handling Raft RPCs.
-raftProcess :: Backend -> [LocalNode] -> Process ()
-raftProcess backend nodes = do
-    -- Let all Raft instances start up
-    liftIO $ threadDelay 500000
+raftLoop :: ClusterState -> NodeState -> Process ()
+raftLoop clusterState@(ClusterState backend nodes nodeIds activeNodeIds) 
+         nodeState@(NodeState gen) = do
 
-    -- Initialize state
-    let monitors = Map.empty
+    -- Randomly send out probe to discover processes
+    let inactiveNodeIds = nodeIds Set.\\ activeNodeIds
+    rand <- liftIO $ (uniformR (0, Set.size inactiveNodeIds - 1) gen :: IO Int)
+    when (Set.size inactiveNodeIds > 0) $ 
+        whereisRemoteAsync (Set.elemAt rand inactiveNodeIds) "server"
+    
+    -- Handle messages. Use timeout to ensure frequent probing.
+    msg <- receiveTimeout 250000 [ match recvWhereIsReply
+                                 , match recvMonitorRef
+                                 ]
 
-    -- Query for processIds
-    --mapM_ (`whereisRemoteAsync` "server") $ localNodeId <$> nodes
+    case msg of
+        Nothing -> raftLoop clusterState nodeState
+        Just (RpcWhereIsReply m) -> handleWhereIsReply m 
+        Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
+  where
+    -- If we get WhereIsReply, monitor the process
+    handleWhereIsReply :: WhereIsReply -> Process ()
+    handleWhereIsReply (WhereIsReply _ (Just pid)) = do
+        let newActiveNodeIds = Set.insert (processNodeId pid) activeNodeIds
+            newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
+        monitor pid
+        say "whereis received~"
+        raftLoop newClusterState nodeState
+    handleWhereIsReply _ = raftLoop clusterState nodeState
 
-    -- Handle messages
-    forever $ do
-        ref <- receiveWait []
-        return ()
+    -- If we get a monitor notification, process has become unreachable
+    handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
+    handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
+        let newActiveNodeIds = Set.delete (processNodeId p) activeNodeIds
+            newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
+        unmonitor r
+        reconnect p
+        say "monitor received!"
+        raftLoop newClusterState nodeState
+
 
 -- | Starts up Raft on the node.
-initRaft :: Backend                -- ^ Backend that the cluster is running on
-         -> [LocalNode]            -- ^ Nodes on the topology
-         -> Process ()
+initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do
     -- Hello world!
     say "Yo, I'm alive!"
+
+    -- Create random generator for random events 
+    gen <- liftIO createSystemRandom
+    let nodeIds = Set.fromList $ localNodeId <$> nodes
+        clusterState = ClusterState backend nodes nodeIds Set.empty
+        nodeState = NodeState gen
     
     -- Start process for handling messages and register it
-    serverPid <- spawnLocal (raftProcess backend nodes)
+    serverPid <- spawnLocal (raftLoop clusterState nodeState)
     register "server" serverPid
     
     --mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
     --mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
-    mapM_ (\x -> nsendRemote x "server" ([Command "hi"])) (localNodeId <$> nodes)
+--    mapM_ (\x -> nsendRemote x "server" "abcd") (localNodeId <$> nodes)
 
     return ()
     -- start process to handle messages from outside world.
