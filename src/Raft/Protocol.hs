@@ -146,7 +146,8 @@ instance Binary RequestVoteResponseMsg where
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
 data RpcMessage a
-    = RpcString String                  
+    = RpcNothing 
+    | RpcString String                  
     | RpcWhereIsReply WhereIsReply      
     | RpcMonitorRef MonitorRef        
     | RpcProcessMonitorNotification ProcessMonitorNotification
@@ -175,10 +176,10 @@ recvMonitorRef a = return $ RpcMonitorRef a
 
 -- | This is the process's local view of the entire cluster
 data ClusterState = ClusterState 
-    { backend        :: Backend      -- ^ Backend for the topology
-    , nodes          :: [LocalNode]  -- ^ List of nodes in the topology
-    , nodeIds        :: Set.Set NodeId   -- ^ Set of nodeIds
-    , activeNodeIds  :: Set.Set NodeId   -- ^ Nodes with an active process
+    { backend        :: Backend         -- ^ Backend for the topology
+    , nodes          :: [LocalNode]     -- ^ List of nodes in the topology
+    , nodeIds        :: Set.Set NodeId  -- ^ Set of nodeIds
+    , activeNodeIds  :: Set.Set NodeId  -- ^ Nodes with an active process
     }
 
 -- | This is the node's local state.
@@ -213,7 +214,6 @@ raftLoop clusterState@(ClusterState backend nodes nodeIds activeNodeIds)
         let newActiveNodeIds = Set.insert (processNodeId pid) activeNodeIds
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
         monitor pid
-        say "whereis received~"
         raftLoop newClusterState nodeState
     handleWhereIsReply _ = raftLoop clusterState nodeState
 
@@ -224,7 +224,6 @@ raftLoop clusterState@(ClusterState backend nodes nodeIds activeNodeIds)
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
         unmonitor r
         reconnect p
-        say "monitor received!"
         raftLoop newClusterState nodeState
 
 
