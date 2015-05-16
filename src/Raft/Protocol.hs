@@ -156,17 +156,13 @@ data RpcMessage a
     | RpcRequestVoteMsg RequestVoteMsg
     | RpcRequestVoteResponseMsg RequestVoteResponseMsg
 
--- | Echo handling for testing.
-echo :: (ProcessId, String) -> Process ()
-echo (sender, msg) = do
-    self <- getSelfPid
-    say $ show self ++ " recv " ++ show sender ++ ": " ++ msg
-    send sender msg
-
-logMessage :: String -> Process String
-logMessage msg = return msg
-
 -- | These wrapping functions simply return the message in an RPCMsg type.
+recvSay :: String -> Process (RpcMessage a)
+recvSay a = say a >> return RpcNothing
+
+recvEcho :: (ProcessId, String) -> Process (RpcMessage a)
+recvEcho (pid, a) = send pid a >> return RpcNothing
+
 recvWhereIsReply :: WhereIsReply -> Process (RpcMessage a)
 recvWhereIsReply a = return $ RpcWhereIsReply a
 
@@ -188,43 +184,54 @@ data NodeState = NodeState
     }
 
 -- | This is the main process for handling Raft RPCs.
-raftLoop :: ClusterState -> NodeState -> Process ()
-raftLoop clusterState@(ClusterState backend nodes nodeIds activeNodeIds) 
+raftLoop :: ProcessId -> ClusterState -> NodeState -> Process ()
+raftLoop pid
+         clusterState@(ClusterState backend nodes nodeIds activeNodeIds) 
          nodeState@(NodeState gen) = do
+
+    -- Link to parent so that if we kill the parent we stop as well
+    link pid
 
     -- Randomly send out probe to discover processes
     let inactiveNodeIds = nodeIds Set.\\ activeNodeIds
     rand <- liftIO $ (uniformR (0, Set.size inactiveNodeIds - 1) gen :: IO Int)
     when (Set.size inactiveNodeIds > 0) $ 
         whereisRemoteAsync (Set.elemAt rand inactiveNodeIds) "server"
+
+    say $ "size is : " ++ show (Set.size inactiveNodeIds)
     
     -- Handle messages. Use timeout to ensure frequent probing.
-    msg <- receiveTimeout 250000 [ match recvWhereIsReply
+    msg <- receiveTimeout 250000 [ match recvSay
+                                 , match recvEcho
+                                 , match recvWhereIsReply
                                  , match recvMonitorRef
                                  ]
 
     case msg of
-        Nothing -> raftLoop clusterState nodeState
+        Nothing -> raftLoop pid clusterState nodeState
+        Just RpcNothing -> raftLoop pid clusterState nodeState
         Just (RpcWhereIsReply m) -> handleWhereIsReply m 
         Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
+        _ -> raftLoop pid clusterState nodeState
   where
     -- If we get WhereIsReply, monitor the process
     handleWhereIsReply :: WhereIsReply -> Process ()
     handleWhereIsReply (WhereIsReply _ (Just pid)) = do
         let newActiveNodeIds = Set.insert (processNodeId pid) activeNodeIds
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
-        monitor pid
-        raftLoop newClusterState nodeState
-    handleWhereIsReply _ = raftLoop clusterState nodeState
+        monitor pid -- Set monitor
+        say "whereis received!"
+        raftLoop pid newClusterState nodeState
+    handleWhereIsReply _ = raftLoop pid clusterState nodeState
 
     -- If we get a monitor notification, process has become unreachable
     handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
     handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
         let newActiveNodeIds = Set.delete (processNodeId p) activeNodeIds
             newClusterState = ClusterState backend nodes nodeIds newActiveNodeIds
-        unmonitor r
-        reconnect p
-        raftLoop newClusterState nodeState
+        unmonitor r  -- Unset monitor
+        reconnect p  -- Set reconnect flag
+        raftLoop pid newClusterState nodeState
 
 
 -- | Starts up Raft on the node.
@@ -240,13 +247,18 @@ initRaft backend nodes = do
         nodeState = NodeState gen
     
     -- Start process for handling messages and register it
-    serverPid <- spawnLocal (raftLoop clusterState nodeState)
-    register "server" serverPid
+    self <- getSelfPid
+    serverPid <- spawnLocal (raftLoop self clusterState nodeState)
+    link serverPid
+    reg <- whereis "server"
+    case reg of
+        Nothing -> register "server" serverPid
+        _ -> reregister "server" serverPid
     
-    --mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
+    mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
     --mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
 --    mapM_ (\x -> nsendRemote x "server" "abcd") (localNodeId <$> nodes)
-
+    x <- receiveWait []
     return ()
     -- start process to handle messages from outside world.
     -- Use forward to forward all messages to the leader.
