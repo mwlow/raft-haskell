@@ -135,7 +135,7 @@ recvSay :: String -> Process (RpcMessage a)
 recvSay a = say a >> return RpcNothing
 
 recvEcho :: (ProcessId, String) -> Process (RpcMessage a)
-recvEcho (pid, a) = say "received" >> send pid a >> return RpcNothing
+recvEcho (pid, a) = send pid a >> return RpcNothing
 
 recvWhereIsReply :: WhereIsReply -> Process (RpcMessage a)
 recvWhereIsReply a =  return $ RpcWhereIsReply a
@@ -147,9 +147,10 @@ recvProcessMonitorNotification a = return $ RpcProcessMonitorNotification a
 
 -- | This is the process's local view of the entire cluster
 data ClusterState = ClusterState 
-    { backend      :: Backend                    -- ^ Backend for the topology
-    , nodeIds      :: [NodeId]                   -- ^ List of nodeIds in the topology
-    , processMap   :: Map.Map NodeId ProcessId   -- ^ Map of currently known processIds
+    { backend    :: Backend                  -- ^ Backend for the topology
+    , nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
+    , knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+    , unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
     }
 
 -- | This is the node's local state.
@@ -160,18 +161,16 @@ data NodeState = NodeState
 
 -- | This is the main process for handling Raft RPCs.
 raftLoop :: ClusterState -> NodeState -> Process ()
-raftLoop clusterState@(ClusterState backend nodeIds processMap) 
+raftLoop clusterState@(ClusterState backend nodeIds knownIds unknownIds) 
          nodeState@(NodeState mainPid randomGen) = do
 
     -- Die when parent does
     link mainPid
 
     -- Randomly send out probe to discover processes
-    -- Note: this is inefficient. Instead of recalculating each time,
-    -- we can simply do incremental updates. Maybe fix later.
-    let miaNodes = nodeIds \\ Map.keys processMap
-    rand <- liftIO $ (uniformR (0, length miaNodes - 1) randomGen :: IO Int)
-    unless (null miaNodes) $ whereisRemoteAsync (miaNodes !! rand) "server"
+    unless (Map.null unknownIds) $ do
+        rand <- liftIO (uniformR (0, Map.size unknownIds - 1) randomGen :: IO Int)
+        whereisRemoteAsync (fst $ Map.elemAt rand unknownIds) "server"
 
     -- Wait for a message. Use timeout to ensure frequent probing
     msg <- receiveTimeout 500000 [ match recvSay
@@ -191,21 +190,23 @@ raftLoop clusterState@(ClusterState backend nodeIds processMap)
     -- If we get WhereIsReply, monitor the process for disconnect
     handleWhereIsReply :: WhereIsReply -> Process ()
     handleWhereIsReply (WhereIsReply _ (Just pid)) = do
-        -- Determine whether pid already exists in the processMap
-        case Map.lookup (processNodeId pid) processMap of
+        -- Determine whether pid already exists in the knownIds
+        case Map.lookup (processNodeId pid) knownIds of
             Just p -> when (p == pid) $ raftLoop clusterState nodeState
             _ -> return ()
         -- New pid found, insert it in map and monitor
-        let newProcessMap = Map.insert (processNodeId pid) pid processMap
-            newClusterState = ClusterState backend nodeIds newProcessMap
+        let newKnownIds = Map.insert (processNodeId pid) pid knownIds
+            newUnknownIds = Map.delete (processNodeId pid) unknownIds
+            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
         monitor pid >> raftLoop newClusterState nodeState
     handleWhereIsReply _ = raftLoop clusterState nodeState
 
     -- If we get a monitor notification, process has become unreachable
     handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
     handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
-        let newProcessMap = Map.delete (processNodeId p) processMap
-            newClusterState = ClusterState backend nodeIds newProcessMap
+        let newKnownIds = Map.delete (processNodeId p) knownIds
+            newUnknownIds = Map.insert (processNodeId p) p unknownIds
+            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
         unmonitor r >> reconnect p >> raftLoop newClusterState nodeState
 
 -- | Starts up Raft on the node.
@@ -215,10 +216,12 @@ initRaft backend nodes = do
     selfPid <- getSelfPid
     say "Yo, I'm alive!"
 
-    -- Create random generator for random events 
+    -- Initialize state
     randomGen <- liftIO createSystemRandom
     let nodeIds = localNodeId <$> nodes
-        clusterState = ClusterState backend nodeIds Map.empty
+        knownIds = Map.empty
+        unknownIds = Map.fromList . zip nodeIds . repeat $ selfPid
+        clusterState = ClusterState backend nodeIds knownIds unknownIds
         nodeState = NodeState selfPid randomGen
     
     -- Start process for handling messages and register it
