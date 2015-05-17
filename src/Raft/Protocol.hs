@@ -4,6 +4,8 @@
 --Notes: use txt file as state-machine? Therefore we can write a second program
 --to visualize the log files/txt files in real time.
 --Handle rewriting pids to registry (especially when first starting up)
+-- start process to handle messages from outside world.
+-- Use forward to forward all messages to the leader.
 module Raft.Protocol 
 ( initRaft
 )
@@ -146,97 +148,92 @@ recvProcessMonitorNotification a = return $ RpcProcessMonitorNotification a
 -- | This is the process's local view of the entire cluster
 data ClusterState = ClusterState 
     { backend      :: Backend                    -- ^ Backend for the topology
-    , nodeIds      :: [NodeId]                -- ^ List of nodes in the topology
+    , nodeIds      :: [NodeId]                   -- ^ List of nodeIds in the topology
     , processMap   :: Map.Map NodeId ProcessId   -- ^ Map of currently known processIds
     }
 
 -- | This is the node's local state.
 data NodeState = NodeState
-    { gen         :: GenIO
-    , pid         :: ProcessId
+    { mainPid     :: ProcessId       -- ^ ProcessId of the thread running Raft
+    , randomGen   :: GenIO           -- ^ Random generator for random events
     }
 
 -- | This is the main process for handling Raft RPCs.
 raftLoop :: ClusterState -> NodeState -> Process ()
 raftLoop clusterState@(ClusterState backend nodeIds processMap) 
-         nodeState@(NodeState gen pid) = do
+         nodeState@(NodeState mainPid randomGen) = do
 
-    -- Die when parent does    
-    --link pid 
+    -- Die when parent does
+    link mainPid
 
-    -- Attempt to reconnect to processes that have died
-    died <- filterM (fmap not . isProcessAlive . snd) $ Map.toList processMap
-    let diedProcesses = map snd died
-        diedNodes = map fst died
-        deadNodes = diedNodes `union` (nodeIds \\ Map.keys processMap)
-    mapM_ reconnect (Map.elems processMap)
-    mapM_ reconnect diedProcesses
-{-    case (Map.size processMap) of
-        0 -> say "0"
-        1 -> say "1"
-        _ -> return ()
- -}   
+    -- Randomly send out probe to discover processes
+    -- Note: this is inefficient. Instead of recalculating each time,
+    -- we can simply do incremental updates. Maybe fix later.
+    let miaNodes = nodeIds \\ Map.keys processMap
+    rand <- liftIO $ (uniformR (0, length miaNodes - 1) randomGen :: IO Int)
+    unless (null miaNodes) $ whereisRemoteAsync (miaNodes !! rand) "server"
 
-    -- Randomly send out probe to update processes
-    sefPid <- getSelfPid
-    say (show pid)
-
-    --say $ show (length deadNodes)
-    rand <- liftIO $ (uniformR (0, length deadNodes - 1) gen :: IO Int)
-    unless (null deadNodes) $ do
-        --say $ show (deadNodes !! rand)
-        whereisRemoteAsync (deadNodes !! rand) "server"
-
-    -- Handle messages. Use timeout to ensure frequent probing.
-    msg <- receiveTimeout 250000 [ match recvSay
+    -- Wait for a message. Use timeout to ensure frequent probing
+    msg <- receiveTimeout 500000 [ match recvSay
                                  , match recvEcho
                                  , match recvProcessMonitorNotification
                                  , match recvWhereIsReply
                                  ]
 
+    -- Pass message on to appropriate handler
     case msg of
         Nothing -> raftLoop clusterState nodeState
         Just RpcNothing -> raftLoop clusterState nodeState
         Just (RpcWhereIsReply m) -> handleWhereIsReply m 
+        Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
         _ -> raftLoop clusterState nodeState
   where
-    -- If we get WhereIsReply, update our process map
+    -- If we get WhereIsReply, monitor the process for disconnect
     handleWhereIsReply :: WhereIsReply -> Process ()
-    handleWhereIsReply (WhereIsReply _ (Just p)) = do
-        let newProcessMap = Map.insert (processNodeId p) p processMap
+    handleWhereIsReply (WhereIsReply _ (Just pid)) = do
+        -- Determine whether pid already exists in the processMap
+        case Map.lookup (processNodeId pid) processMap of
+            Just p -> when (p == pid) $ raftLoop clusterState nodeState
+            _ -> return ()
+        -- New pid found, insert it in map and monitor
+        let newProcessMap = Map.insert (processNodeId pid) pid processMap
             newClusterState = ClusterState backend nodeIds newProcessMap
---        say "here"
-        raftLoop newClusterState nodeState
-    handleWhereIsReply x = do
---        say $ show x
-        raftLoop clusterState nodeState
+        monitor pid >> raftLoop newClusterState nodeState
+    handleWhereIsReply _ = raftLoop clusterState nodeState
 
+    -- If we get a monitor notification, process has become unreachable
+    handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
+    handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
+        let newProcessMap = Map.delete (processNodeId p) processMap
+            newClusterState = ClusterState backend nodeIds newProcessMap
+        unmonitor r >> reconnect p >> raftLoop newClusterState nodeState
 
 -- | Starts up Raft on the node.
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do
     -- Hello world!
+    selfPid <- getSelfPid
     say "Yo, I'm alive!"
 
     -- Create random generator for random events 
-    gen <- liftIO createSystemRandom
-    self <- getSelfPid
-    let nodeIds = localNodeId <$> nodes 
+    randomGen <- liftIO createSystemRandom
+    let nodeIds = localNodeId <$> nodes
         clusterState = ClusterState backend nodeIds Map.empty
-        nodeState = NodeState gen self
+        nodeState = NodeState selfPid randomGen
     
     -- Start process for handling messages and register it
     serverPid <- spawnLocal (raftLoop clusterState nodeState)
     reg <- whereis "server"
     case reg of
-        Nothing -> say "1 here" >> register "server" serverPid
-        _ -> say "2 here" >> reregister "server" serverPid
+        Nothing -> register "server" serverPid
+        _ -> reregister "server" serverPid
+
+    -- Kill this process if server dies
+    link serverPid
 
     say $ show (nodeIds)
     mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
-   -- mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
---    mapM_ (\x -> nsendRemote x "server" "abcd") (localNodeId <$> nodes)
+
+    -- Hack to block
     x <- receiveWait []
     return ()
-    -- start process to handle messages from outside world.
-    -- Use forward to forward all messages to the leader.
