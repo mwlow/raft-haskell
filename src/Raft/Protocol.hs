@@ -120,10 +120,8 @@ instance Binary RequestVoteResponseMsg where
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
 data RpcMessage a
-    = RpcNothing 
-    | RpcString String                  
-    | RpcWhereIsReply WhereIsReply      
-    | RpcMonitorRef MonitorRef        
+    = RpcNothing                
+    | RpcWhereIsReply WhereIsReply           
     | RpcProcessMonitorNotification ProcessMonitorNotification
     | RpcAppendEntriesMsg (AppendEntriesMsg a)
     | RpcAppendEntriesResponseMsg AppendEntriesResponseMsg
@@ -162,7 +160,8 @@ data NodeState = NodeState
 -- | Drain and process all control messages in the mailbox. The reason that
 -- this is handled on the same thread as the main loop is that we need to
 -- call reconnect from the pid of the main loop.
-handleCtrlMessages :: ClusterState -> NodeState -> Process ()
+handleCtrlMessages :: ClusterState -> NodeState 
+                   -> Process (ClusterState, NodeState)
 handleCtrlMessages
     clusterState@(ClusterState backend nodeIds knownIds unknownIds)
     nodeState@(NodeState mainPid randomGen) = do
@@ -175,21 +174,23 @@ handleCtrlMessages
 
     -- Pass control message on to appropriate handler
     case msg of
-        Nothing -> raftLoop clusterState nodeState -- return to raftLoop
-        Just RpcNothing -> handleCtrlMessages clusterState nodeState
-        Just (RpcWhereIsReply m) -> handleWhereIsReply m 
-        Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
-        _ -> handleCtrlMessages clusterState nodeState
-    return ()
+        Nothing -> return (clusterState, nodeState)
+        Just RpcNothing 
+                -> handleCtrlMessages clusterState nodeState
+        Just (RpcWhereIsReply m) 
+                -> handleWhereIsReply m 
+        Just (RpcProcessMonitorNotification m) 
+                -> handleProcessMonitorNotification m 
+        other@_ -> return (clusterState, nodeState)
 
   where
     -- If we get WhereIsReply, monitor the process for disconnect
-    handleWhereIsReply :: WhereIsReply -> Process ()
+    handleWhereIsReply :: WhereIsReply -> Process (ClusterState, NodeState)
     handleWhereIsReply (WhereIsReply _ (Just pid)) = do
         -- Determine whether pid already exists in the knownIds
         case Map.lookup (processNodeId pid) knownIds of
-            Just p -> when (p == pid) $ handleCtrlMessages clusterState nodeState
-            _ -> return ()
+            Just pid -> handleCtrlMessages clusterState nodeState
+            other@_  -> return (clusterState, nodeState) -- dummy
         -- New pid found, insert it in map and monitor
         let newKnownIds = Map.insert (processNodeId pid) pid knownIds
             newUnknownIds = Map.delete (processNodeId pid) unknownIds
@@ -199,7 +200,8 @@ handleCtrlMessages
     handleWhereIsReply _ = handleCtrlMessages clusterState nodeState
 
     -- If we get a monitor notification, process has become unreachable
-    handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
+    handleProcessMonitorNotification :: ProcessMonitorNotification 
+                                     -> Process (ClusterState, NodeState)
     handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
         let newKnownIds = Map.delete (processNodeId p) knownIds
             newUnknownIds = Map.insert (processNodeId p) p unknownIds
@@ -229,7 +231,12 @@ raftLoop clusterState@(ClusterState backend nodeIds knownIds unknownIds)
     msg <- receiveTimeout timeout []
 
     -- Check for control messages
-    handleCtrlMessages clusterState nodeState
+    -- TODO: instead of clusterState/nodeState, feed in state that has been
+    -- modified by the election message handler
+    (newClusterState, newNodeState) <- handleCtrlMessages clusterState nodeState
+    
+    -- Repeat forever
+    raftLoop newClusterState newNodeState
 
 
 -- | Starts up Raft on the node.
@@ -252,7 +259,7 @@ initRaft backend nodes = do
     reg <- whereis "server"
     case reg of
         Nothing -> register "server" serverPid
-        _ -> reregister "server" serverPid
+        other@_ -> reregister "server" serverPid
 
     -- Kill this process if server dies
     link serverPid
