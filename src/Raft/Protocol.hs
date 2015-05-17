@@ -234,7 +234,6 @@ initRaft backend nodes = do
     -- Kill this process if server dies
     link serverPid
 
-    say $ show (nodeIds)
     mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
 
     -- Hack to block

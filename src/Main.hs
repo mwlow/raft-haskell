@@ -43,10 +43,10 @@ initCluster host port numNodes = do
     installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
 
     -- Wait awhile to let nodes start
-    threadDelay 1000000
+    threadDelay 500000
 
     -- Find and count peers
-    count <- liftM length $ findPeers backend 1000000 >>= mapM print
+    count <- liftM length $ findPeers backend 500000 >>= mapM print
     putStr "Nodes detected: "
     if count == numNodes
         then color Green $ printf "%d%s%d\n" count "/" numNodes
