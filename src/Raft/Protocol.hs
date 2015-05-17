@@ -145,7 +145,7 @@ recvProcessMonitorNotification :: ProcessMonitorNotification
 recvProcessMonitorNotification a = return $ RpcProcessMonitorNotification a
 
 
--- | This is the process's local view of the entire cluster
+-- | This is the process's local view of the entire cluster.
 data ClusterState = ClusterState 
     { backend    :: Backend                  -- ^ Backend for the topology
     , nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
@@ -158,6 +158,56 @@ data NodeState = NodeState
     { mainPid     :: ProcessId       -- ^ ProcessId of the thread running Raft
     , randomGen   :: GenIO           -- ^ Random generator for random events
     }
+
+-- | Drain and process all control messages in the mailbox. The reason that
+-- this is handled on the same thread as the main loop is that we need to
+-- call reconnect from the pid of the main loop.
+handleCtrlMessages :: ClusterState -> NodeState -> Process ()
+handleCtrlMessages
+    clusterState@(ClusterState backend nodeIds knownIds unknownIds)
+    nodeState@(NodeState mainPid randomGen) = do
+    
+    msg <- receiveTimeout 0 [ match recvSay
+                            , match recvEcho
+                            , match recvProcessMonitorNotification
+                            , match recvWhereIsReply
+                            ]
+
+    -- Pass control message on to appropriate handler
+    case msg of
+        Nothing -> raftLoop clusterState nodeState -- return to raftLoop
+        Just RpcNothing -> handleCtrlMessages clusterState nodeState
+        Just (RpcWhereIsReply m) -> handleWhereIsReply m 
+        Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
+        _ -> handleCtrlMessages clusterState nodeState
+    return ()
+
+  where
+    -- If we get WhereIsReply, monitor the process for disconnect
+    handleWhereIsReply :: WhereIsReply -> Process ()
+    handleWhereIsReply (WhereIsReply _ (Just pid)) = do
+        -- Determine whether pid already exists in the knownIds
+        case Map.lookup (processNodeId pid) knownIds of
+            Just p -> when (p == pid) $ handleCtrlMessages clusterState nodeState
+            _ -> return ()
+        -- New pid found, insert it in map and monitor
+        let newKnownIds = Map.insert (processNodeId pid) pid knownIds
+            newUnknownIds = Map.delete (processNodeId pid) unknownIds
+            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
+        monitor pid -- start monitoring
+        handleCtrlMessages newClusterState nodeState
+    handleWhereIsReply _ = handleCtrlMessages clusterState nodeState
+
+    -- If we get a monitor notification, process has become unreachable
+    handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
+    handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
+        let newKnownIds = Map.delete (processNodeId p) knownIds
+            newUnknownIds = Map.insert (processNodeId p) p unknownIds
+            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
+        unmonitor r -- remove monitor
+        reconnect p -- set reconnect flag
+        handleCtrlMessages newClusterState nodeState
+
 
 -- | This is the main process for handling Raft RPCs.
 raftLoop :: ClusterState -> NodeState -> Process ()
@@ -172,42 +222,15 @@ raftLoop clusterState@(ClusterState backend nodeIds knownIds unknownIds)
         rand <- liftIO (uniformR (0, Map.size unknownIds - 1) randomGen :: IO Int)
         whereisRemoteAsync (fst $ Map.elemAt rand unknownIds) "server"
 
-    -- Wait for a message. Use timeout to ensure frequent probing
-    msg <- receiveTimeout 500000 [ match recvSay
-                                 , match recvEcho
-                                 , match recvProcessMonitorNotification
-                                 , match recvWhereIsReply
-                                 ]
+    -- Choose election timeout between 150ms and 300ms
+    timeout <- liftIO (uniformR (150000, 300000) randomGen :: IO Int)
 
-    -- Pass message on to appropriate handler
-    case msg of
-        Nothing -> raftLoop clusterState nodeState
-        Just RpcNothing -> raftLoop clusterState nodeState
-        Just (RpcWhereIsReply m) -> handleWhereIsReply m 
-        Just (RpcProcessMonitorNotification m) -> handleProcessMonitorNotification m 
-        _ -> raftLoop clusterState nodeState
-  where
-    -- If we get WhereIsReply, monitor the process for disconnect
-    handleWhereIsReply :: WhereIsReply -> Process ()
-    handleWhereIsReply (WhereIsReply _ (Just pid)) = do
-        -- Determine whether pid already exists in the knownIds
-        case Map.lookup (processNodeId pid) knownIds of
-            Just p -> when (p == pid) $ raftLoop clusterState nodeState
-            _ -> return ()
-        -- New pid found, insert it in map and monitor
-        let newKnownIds = Map.insert (processNodeId pid) pid knownIds
-            newUnknownIds = Map.delete (processNodeId pid) unknownIds
-            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
-        monitor pid >> raftLoop newClusterState nodeState
-    handleWhereIsReply _ = raftLoop clusterState nodeState
+    -- Wait for raft messages
+    msg <- receiveTimeout timeout []
 
-    -- If we get a monitor notification, process has become unreachable
-    handleProcessMonitorNotification :: ProcessMonitorNotification -> Process ()
-    handleProcessMonitorNotification (ProcessMonitorNotification r p _) = do
-        let newKnownIds = Map.delete (processNodeId p) knownIds
-            newUnknownIds = Map.insert (processNodeId p) p unknownIds
-            newClusterState = ClusterState backend nodeIds newKnownIds newUnknownIds
-        unmonitor r >> reconnect p >> raftLoop newClusterState nodeState
+    -- Check for control messages
+    handleCtrlMessages clusterState nodeState
+
 
 -- | Starts up Raft on the node.
 initRaft :: Backend -> [LocalNode] -> Process ()
