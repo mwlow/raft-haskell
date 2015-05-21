@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 --Notes: use txt file as state-machine? Therefore we can write a second program
 --to visualize the log files/txt files in real time.
@@ -23,8 +22,6 @@ import System.Exit
 import System.Posix.Signals
 import Control.Concurrent 
 import Control.Monad
-import qualified Control.Lens as Lens
-import Control.Lens.Operators
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Extras (isProcessAlive)
@@ -164,42 +161,42 @@ recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 
 -- | This is the process's local view of the entire cluster.
 data ClusterState = ClusterState 
-    { _backend    :: Backend                  -- ^ Backend for the topology
-    , _nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
-    , _knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
-    , _unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+    { backend    :: Backend                  -- ^ Backend for the topology
+    , nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
+    , knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+    , unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
     }
-Lens.makeLenses ''ClusterState -- Lens'd for easy get and set
 
 -- | This is the node's local state.
 data NodeState a = NodeState
-    { _mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
-    , _randomGen    :: GenIO         -- ^ Random generator for random events
+    { mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , randomGen    :: GenIO         -- ^ Random generator for random events
 
-    , _state        :: ServerRole
-    , _currentTerm  :: Term
-    , _votedFor     :: Maybe NodeId
-    , _log          :: Log a
-    , _commitIndex  :: Index
-    , _lastApplied  :: Index
+    , state        :: ServerRole
+    , currentTerm  :: Term
+    , votedFor     :: Maybe NodeId
+    , log          :: Log a
+    , commitIndex  :: Index
+    , lastApplied  :: Index
 
-    , _nextIndex    :: Map.Map NodeId Index
-    , _matchIndex   :: Map.Map NodeId Index
+    , nextIndex    :: Map.Map NodeId Index
+    , matchIndex   :: Map.Map NodeId Index
 
-    , _voteCount    :: Int
+    , voteCount    :: Int
     }
-Lens.makeLenses ''NodeState -- Lens'd for easy get and set
 
 -- | Helper Functions
 stepDown :: NodeState a -> Term -> NodeState a
-stepDown nodeState newTerm = n3
-  where 
-    n1 = currentTerm .~ newTerm $ nodeState
-    n2 = state .~ Follower $ n1
-    n3 = votedFor .~ Nothing $ n2
+stepDown nodeState newTerm =
+    nodeState 
+    { currentTerm = newTerm
+    , state = Follower
+    , votedFor = Nothing
+    }
 
 logTerm :: NodeState a -> Index -> Term
-logTerm nodeState index = termReceived $ (nodeState ^. log) !! index
+logTerm nodeState index = termReceived $ (log nodeState) !! index
+
 
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
@@ -209,7 +206,7 @@ handleRequestVoteMsg :: ClusterState
 handleRequestVoteMsg 
     clusterState
     nodeState
-    msg@(RequestVoteMsg sender seqno term candidateId lastLogIndex lastLogTerm)
+    (RequestVoteMsg sender seqno term candidateId lastLogIndex lastLogTerm)
     | nCurrentTerm < term = do
         let n0 = stepDown nodeState term
         reply term False
@@ -219,16 +216,16 @@ handleRequestVoteMsg
       (lastLogTerm > nLastLogTerm ||
        (lastLogTerm == nLastLogTerm && 
         lastLogIndex >= length nLog)) = do
-        let n0 = votedFor .~ Just candidateId $ nodeState
+        let n0 = nodeState { votedFor = Just candidateId }
         reply term True
         return (clusterState, n0)
     | otherwise = do
         reply term False
         return (clusterState, nodeState)
   where
-    nLog = nodeState ^. log
-    nVotedFor = nodeState ^. votedFor
-    nCurrentTerm = nodeState ^. currentTerm
+    nLog = log nodeState
+    nVotedFor = votedFor nodeState
+    nCurrentTerm = currentTerm nodeState
     nLastLogTerm = termReceived (last nLog)
     reply :: Term -> Bool -> Process ()
     reply term granted = do
@@ -243,14 +240,15 @@ handleRequestVoteResponseMsg :: ClusterState
 handleRequestVoteResponseMsg 
     clusterState
     nodeState
-    msg@(RequestVoteResponseMsg sender seqno term granted) =
-        case granted of
-            True -> 
-                if nodeState ^. currentTerm == term
-                    then return (clusterState, nodeState & voteCount %~ (+1))
-                    else return (clusterState, nodeState)
-            False ->
-                return (clusterState, nodeState)
+    (RequestVoteResponseMsg sender seqno term granted) =
+ --       case granted of
+ --           True -> 
+ --               if currentTerm nodeState == term
+ --                   then return (clusterState, nodeState & voteCount %~ (+1))
+ --                   else return (clusterState, nodeState)
+ --           False ->
+ --               return (clusterState, nodeState)
+    return (clusterState, nodeState)
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
