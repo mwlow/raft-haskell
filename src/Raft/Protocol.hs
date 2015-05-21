@@ -1,23 +1,30 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 --Notes: use txt file as state-machine? Therefore we can write a second program
 --to visualize the log files/txt files in real time.
 --Handle rewriting pids to registry (especially when first starting up)
 -- start process to handle messages from outside world.
 -- Use forward to forward all messages to the leader.
+
+--TODO: It looks like we have to spawn a new thread to handle votes,
+-- i.e. voteserver
 module Raft.Protocol 
 ( initRaft
 )
 where
 
+import Prelude hiding (log)
 import System.Environment
 import System.Console.ANSI
 import System.Random.MWC
 import System.Exit
 import System.Posix.Signals
 import Control.Concurrent 
-import Control.Monad 
+import Control.Monad
+import qualified Control.Lens as Lens
+import Control.Lens.Operators
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Extras (isProcessAlive)
@@ -35,7 +42,6 @@ import GHC.Generics (Generic)
 -- | Type renaming to make things clearer.
 type Term = Int
 type Index = Int
-type ServerId = Int
 type Log a = [LogEntry a]
 
 data ServerRole = Follower | Candidate | Leader deriving (Show, Read, Eq)
@@ -128,7 +134,7 @@ data RpcMessage a
     | RpcRequestVoteMsg RequestVoteMsg
     | RpcRequestVoteResponseMsg RequestVoteResponseMsg
 
--- | These wrapping functions simply return the message in an RPCMsg type.
+-- | These wrapping functions return the message in an RPCMsg type.
 recvSay :: String -> Process (RpcMessage a)
 recvSay a = say a >> return RpcNothing
 
@@ -142,24 +148,122 @@ recvProcessMonitorNotification :: ProcessMonitorNotification
                                -> Process (RpcMessage a)
 recvProcessMonitorNotification a = return $ RpcProcessMonitorNotification a
 
+recvAppendEntriesMsg :: AppendEntriesMsg a -> Process (RpcMessage a)
+recvAppendEntriesMsg a = return $ RpcAppendEntriesMsg a
+
+recvAppendEntriesResponseMsg :: AppendEntriesResponseMsg 
+                             -> Process (RpcMessage a)
+recvAppendEntriesResponseMsg a = return $ RpcAppendEntriesResponseMsg a
+
+recvRequestVoteMsg :: RequestVoteMsg -> Process (RpcMessage a)
+recvRequestVoteMsg a = return $ RpcRequestVoteMsg a
+
+recvRequestVoteResponseMsg :: RequestVoteResponseMsg -> Process (RpcMessage a)
+recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
+
 
 -- | This is the process's local view of the entire cluster.
 data ClusterState = ClusterState 
-    { backend    :: Backend                  -- ^ Backend for the topology
-    , nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
-    , knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
-    , unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+    { _backend    :: Backend                  -- ^ Backend for the topology
+    , _nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
+    , _knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+    , _unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
     }
+Lens.makeLenses ''ClusterState -- Lens'd for easy get and set
 
 -- | This is the node's local state.
-data NodeState = NodeState
-    { mainPid     :: ProcessId       -- ^ ProcessId of the thread running Raft
-    , randomGen   :: GenIO           -- ^ Random generator for random events
+data NodeState a = NodeState
+    { _mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , _randomGen    :: GenIO         -- ^ Random generator for random events
+
+    , _state        :: ServerRole
+    , _currentTerm  :: Term
+    , _votedFor     :: Maybe NodeId
+    , _log          :: Log a
+    , _commitIndex  :: Index
+    , _lastApplied  :: Index
+
+    , _nextIndex    :: Map.Map NodeId Index
+    , _matchIndex   :: Map.Map NodeId Index
+
+    , _voteCount    :: Int
     }
+Lens.makeLenses ''NodeState -- Lens'd for easy get and set
+
+-- | Helper Functions
+stepDown :: NodeState a -> Term -> NodeState a
+stepDown nodeState newTerm = n3
+  where 
+    n1 = currentTerm .~ newTerm $ nodeState
+    n2 = state .~ Follower $ n1
+    n3 = votedFor .~ Nothing $ n2
+
+logTerm :: NodeState a -> Index -> Term
+logTerm nodeState index = termReceived $ (nodeState ^. log) !! index
+
+-- | Handle Request Vote request from peer
+handleRequestVoteMsg :: ClusterState 
+                     -> NodeState a 
+                     -> RequestVoteMsg
+                     -> Process (ClusterState, NodeState a)
+handleRequestVoteMsg 
+    clusterState
+    nodeState
+    msg@(RequestVoteMsg sender seqno term candidateId lastLogIndex lastLogTerm)
+    | nCurrentTerm < term = do
+        let n0 = stepDown nodeState term
+        reply term False
+        return (clusterState, n0)
+    | nCurrentTerm == term &&
+      (nVotedFor == Nothing || nVotedFor == Just candidateId) &&
+      (lastLogTerm > nLastLogTerm ||
+       (lastLogTerm == nLastLogTerm && 
+        lastLogIndex >= length nLog)) = do
+        let n0 = votedFor .~ Just candidateId $ nodeState
+        reply term True
+        return (clusterState, n0)
+    | otherwise = do
+        reply term False
+        return (clusterState, nodeState)
+  where
+    nLog = nodeState ^. log
+    nVotedFor = nodeState ^. votedFor
+    nCurrentTerm = nodeState ^. currentTerm
+    nLastLogTerm = termReceived (last nLog)
+    reply :: Term -> Bool -> Process ()
+    reply term granted = do
+        self <- getSelfPid
+        send sender (RequestVoteResponseMsg self seqno term granted)
+
+-- | Handle Request Vote response from peer
+handleRequestVoteResponseMsg :: ClusterState
+                             -> NodeState a
+                             -> RequestVoteResponseMsg
+                             -> Process (ClusterState, NodeState a)
+handleRequestVoteResponseMsg 
+    clusterState
+    nodeState
+    msg@(RequestVoteResponseMsg sender seqno term granted) =
+        case granted of
+            True -> 
+                if nodeState ^. currentTerm == term
+                    then return (clusterState, nodeState & voteCount %~ (+1))
+                    else return (clusterState, nodeState)
+            False ->
+                return (clusterState, nodeState)
+
+
+initRaft :: Backend -> [LocalNode] -> Process ()
+initRaft backend nodes = do return ()
+
+
+{-
+
 
 -- | Drain and process all control messages in the mailbox. The reason that
 -- this is handled on the same thread as the main loop is that we need to
 -- call reconnect from the pid of the main loop.
+-- DANGER: Should not cause any new ctrl messages to be received--infinite loop!
 handleCtrlMessages :: ClusterState -> NodeState 
                    -> Process (ClusterState, NodeState)
 handleCtrlMessages
@@ -269,3 +373,6 @@ initRaft backend nodes = do
     -- Hack to block
     x <- receiveWait []
     return ()
+
+
+-}
