@@ -84,15 +84,17 @@ instance (Binary a) => Binary (AppendEntriesMsg a) where
 
 -- | Data structure for the response to appendEntriesRPC. Is serializable.
 data AppendEntriesResponseMsg = AppendEntriesResponseMsg 
-    { aerSender   :: ProcessId  -- ^ Sender's process id
-    , aerSeqno    :: Int        -- ^ Sequence number, for matching replies
-    , aerTerm     :: Term       -- ^ Current term to update leader
-    , success     :: Bool       -- ^ Did follower contain a matching entry?
+    { aerSender     :: ProcessId  -- ^ Sender's process id
+    , aerSeqno      :: Int        -- ^ Sequence number, for matching replies
+    , aerTerm       :: Term       -- ^ Current term to update leader
+    , aerMatchIndex :: Index   -- ^ Index of highest log entry replicated
+    , success       :: Bool       -- ^ Did follower contain a matching entry?
     } deriving (Show, Eq, Typeable)
 
 instance Binary AppendEntriesResponseMsg where
-    put (AppendEntriesResponseMsg a b c d) = put a >> put b >> put c >> put d
-    get = AppendEntriesResponseMsg <$> get <*> get <*> get <*> get
+    put (AppendEntriesResponseMsg a b c d e) = 
+        put a >> put b >> put c >> put d >> put e
+    get = AppendEntriesResponseMsg <$> get <*> get <*> get <*> get <*> get
 
 -- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
@@ -201,7 +203,6 @@ logTerm nodeState index
     | index > IntMap.size (log nodeState) = 0
     | otherwise = termReceived ((log nodeState) IntMap.! index)
 
-
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
                      -> NodeState a 
@@ -215,10 +216,10 @@ handleRequestVoteMsg clusterState nodeState
         candidateId 
         lastLogIndex
         lastLogTerm)
-    | term < nCurrentTerm = do
-        reply nCurrentTerm False >> return (clusterState, nodeState)
     | term > nCurrentTerm = do
         reply term False >> return (clusterState, stepDown nodeState term)
+    | term < nCurrentTerm = do
+        reply nCurrentTerm False >> return (clusterState, nodeState)
     | nVotedFor `elem` [Nothing, Just candidateId] && isUpToDate = do
         let n0 = nodeState { votedFor = Just candidateId }
         reply term True >> return (clusterState, n0)
@@ -267,6 +268,7 @@ handleRequestVoteResponseMsg clusterState nodeState
     nCurrentTerm   = currentTerm nodeState
     nVoteCount     = voteCount nodeState
 
+
 -- | Handle Append Entries request from peer
 handleAppendEntriesMsg :: ClusterState
                        -> NodeState a
@@ -282,26 +284,23 @@ handleAppendEntriesMsg clusterState nodeState
         prevLogTerm
         entries
         leaderCommit)
-
-    | nCurrentTerm < term = do
-        let n0 = stepDown nodeState term
-        return (clusterState, n0)
+    | term > nCurrentTerm = do
+        reply term 0 False >> return (clusterState, stepDown nodeState term)
     | nCurrentTerm > term = do
-        reply nCurrentTerm False
+        reply nCurrentTerm 0 False
         return (clusterState, nodeState)
-
-
     | otherwise = do return (clusterState, nodeState)
   where
-    nState         = state nodeState
     nLog           = log nodeState
+    nLogSize       = IntMap.size nLog
     nVotedFor      = votedFor nodeState
     nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = termReceived (last nLog)
-    reply :: Term -> Bool -> Process ()
-    reply term granted = do
+    nLastLogTerm   = logTerm nodeState nLogSize
+    
+    reply :: Term -> Index -> Bool -> Process ()
+    reply term matchIndex granted = do
         self <- getSelfPid
-        send sender (AppendEntriesResponseMsg self seqno term granted)
+        send sender (AppendEntriesResponseMsg self seqno term matchIndex granted)
 
 
 {-
