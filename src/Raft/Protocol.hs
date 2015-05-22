@@ -163,21 +163,25 @@ recvRequestVoteResponseMsg :: RequestVoteResponseMsg -> Process (RpcMessage a)
 recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 
 
--- | This is the process's local view of the entire cluster.
+-- | This is the process's local view of the entire cluster. Information
+-- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
-    { backend    :: Backend                  -- ^ Backend for the topology
-    , nodeIds    :: [NodeId]                 -- ^ List of nodeIds in the topology
-    , knownIds   :: Map.Map NodeId ProcessId -- ^ Map of known processIds
-    , unknownIds :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+    { backend     :: Backend                  -- ^ Backend for the topology
+    , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
+    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+
+    , mainPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
+    , electionPid :: ProcessId     -- ^ ProcessId of the election starter thread
+    , randomGen   :: GenIO         -- ^ Random generator for random events
     }
 
--- | This is the node's local state.
-data NodeState a = NodeState
-    { mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
-    , delayPid     :: ProcessId
-    , randomGen    :: GenIO         -- ^ Random generator for random events
-    
-    , leader       :: NodeId        -- ^ Current leader
+
+-- | This is state that is volatile and can be modified by multiple threads
+-- concurrently. This state will always be passed to the threads in an MVar.
+data RaftState a = RaftState
+    { leader       :: NodeId                  -- ^ Current leader
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -366,45 +370,70 @@ handleAppendEntriesResponseMsg clusterState nodeState
 -- raftLoop: handles receiving rpcs
 
 
--- | Helper function to acquire locks in the Process Monad
-withLocks :: MVar ClusterState 
-          -> MVar (NodeState a)
-          -> (ClusterState -> NodeState a -> IO b)
-          -> Process b
-withLocks mc mn f = liftIO $ withMVar mc $ \c -> withMVar mn $ \n -> f c n
+-- | Acquire lock in the Process Monad
+withLock :: MVar a -> (a -> IO b) -> Process b
+withLock mn f = liftIO $ withMVar mn f
 
--- | Like 'withLocks', but the IO action in the third argument is executed 
+
+-- | Like 'withLock', but the IO action in the third argument is executed 
 -- with asynchronous exceptions masked.
-withLocksM :: MVar ClusterState 
-           -> MVar (NodeState a)
-           -> (ClusterState -> NodeState a -> IO b)
-           -> Process b
-withLocksM mc mn f = 
-    liftIO $ withMVarMasked mc $ \c -> withMVarMasked mn $ \n -> f c n
+withLockM :: MVar a -> (a -> IO b) -> Process b
+withLockM mn f = liftIO $ withMVarMasked mn f
 
 
 
-
-delayThread :: 
-
--- | Main loop of the program
-raftThread :: MVar ClusterState
-           -> MVar (NodeState a)
-           -> Process (MVar ClusterState, MVar (NodeState a))
-raftThread mc mn = do
+-- | This thread starts a new election.
+electionThread :: ClusterState -> MVar (RaftState a) -> Process ()
+electionThread c mn = do
     -- Die when parent does
-    withLocksM mc mn (\c n -> return $ mainPid n) >>= link
+    link $ mainPid c
+
+    selfNodeId <- getSelfNode
+    withLockM mn $ \n -> do
+        -- Promote to Candidate
+        let n0 = n { state       = Candidate 
+                   , votedFor    = Just selfNodeId
+                   , currentTerm = 1 + currentTerm n
+                   , voteCount   = 1
+                   }
+
+        return ()
+
+    return ()
+
+
+-- | This thread starts the election timer if it is not killed before then.
+delayThread :: ClusterState -> MVar (RaftState a) -> Int -> Process ()
+delayThread c mn t = do
+    -- Die when parent does
+    link $ mainPid c
+
+    -- Delay for t ns
+    liftIO $ threadDelay t
+
+    -- Spawn thread that starts election
+    delayPid <- spawnLocal (electionThread c mn)
+
+    return ()
+
+
+-- | Main loop of the program.
+raftThread :: ClusterState
+           -> MVar (RaftState a)
+           -> Process (ClusterState, MVar (RaftState a))
+raftThread c mn = do
+    -- Die when parent does
+    link $ mainPid c
 
     -- Choose election timeout between 150ms and 300ms
-    timeout <- withLocksM mc mn $ \c n -> 
-                   uniformR (150000, 300000) (randomGen n) :: IO Int
+    timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
 
     -- Restart election delay thread
-    withLocksM mc mn (\c n -> return $ delayPid n) >>= kill "restart"
-    delayPid <- spawnLocal (delayThread mc mn timeout)
-    withLocksM 
+    kill (delayPid c) "restart"
+    delayPid <- spawnLocal (delayThread c mn timeout)
+    let c0 = c { delayPid = delayPid }
 
-    return (mc, mn)
+    return (c, mn)
 
 
 
