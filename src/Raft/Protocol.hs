@@ -174,7 +174,8 @@ data ClusterState = ClusterState
 data NodeState a = NodeState
     { mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
     , randomGen    :: GenIO         -- ^ Random generator for random events
-
+    
+    , leader       :: NodeId        -- ^ Curent leader
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -197,11 +198,11 @@ stepDown nodeState newTerm =
               , voteCount   = 0
               }
 
-logTerm :: NodeState a -> Index -> Term
-logTerm nodeState index
+logTerm :: Log a -> Index -> Term
+logTerm log index
     | index < 1 = 0
-    | index > IntMap.size (log nodeState) = 0
-    | otherwise = termReceived ((log nodeState) IntMap.! index)
+    | index > IntMap.size log = 0
+    | otherwise = termReceived (log IntMap.! index)
 
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
@@ -230,7 +231,7 @@ handleRequestVoteMsg clusterState nodeState
     nLogSize       = IntMap.size nLog
     nVotedFor      = votedFor nodeState
     nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = logTerm nodeState nLogSize
+    nLastLogTerm   = logTerm (log nodeState) nLogSize
 
     isUpToDate :: Bool
     isUpToDate = lastLogTerm > nLastLogTerm || 
@@ -285,38 +286,77 @@ handleAppendEntriesMsg clusterState nodeState
         entries
         leaderCommit)
     | term > nCurrentTerm = do
-        reply term 0 False >> return (clusterState, stepDown nodeState term)
+        reply term 0 False
+        return (clusterState, stepDown nodeState term)
     | nCurrentTerm > term = do
         reply nCurrentTerm 0 False
         return (clusterState, nodeState)
-    | otherwise = do return (clusterState, nodeState)
+    | otherwise = do 
+        let n0 = nodeState { leader = leaderId, state = Follower }
+        case success of
+            True -> do 
+                let oldLog = log nodeState
+                    newLog = appendLog oldLog entries prevLogIndex
+                    index = IntMap.size newLog
+                    n0 = nodeState 
+                         { log = newLog
+                         , commitIndex = min leaderCommit index
+                         }
+                reply nCurrentTerm index True
+                return (clusterState, n0)
+            False -> do
+                reply nCurrentTerm 0 False
+                return (clusterState, nodeState)
   where
     nLog           = log nodeState
     nLogSize       = IntMap.size nLog
     nVotedFor      = votedFor nodeState
     nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = logTerm nodeState nLogSize
-    
+    nLastLogTerm   = logTerm (log nodeState) nLogSize
+
+    success :: Bool
+    success = prevLogIndex == 0 ||
+                (prevLogIndex <= nLogSize && 
+                 logTerm (log nodeState) prevLogIndex == prevLogIndex)
+
     reply :: Term -> Index -> Bool -> Process ()
     reply term matchIndex granted = do
         self <- getSelfPid
         send sender (AppendEntriesResponseMsg self seqno term matchIndex granted)
 
+    appendLog :: Log a -> Log a -> Index -> Log a
+    appendLog dstLog srcLog prevLogIndex
+        | IntMap.null srcLog = dstLog
+        | otherwise = 
+            if logTerm dstLog index /= termReceived headSrcLog
+                then appendLog (IntMap.insert index headSrcLog dstLog)
+                                tailSrcLog
+                                index
+                else appendLog dstLog tailSrcLog index
+      where
+        index = prevLogIndex + 1
+        ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
+        -- TODO This is currently O(n)
+        initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
 
-{-
--- | Data structure for appendEntriesRPC. Is serializable.
-data AppendEntriesMsg a = AppendEntriesMsg 
-    { aeSender       :: ProcessId -- ^ Sender's process id
-    , aeSeqno        :: Int       -- ^ Sequence number, for matching replies
-    , aeTerm         :: Term      -- ^ Leader's term
-    , leaderId       :: NodeId    -- ^ Leader's Id
-    , prevLogIndex   :: Index     -- ^ Log entry index right before new ones
-    , prevLogTerm    :: Term      -- ^ Term of the previous log entry
-    , entries        :: Log a     -- ^ Log entries to store, [] for heartbeat
-    , leaderCommit   :: Index     -- ^ Leader's commit index
-    } deriving (Show, Eq, Typeable)
 
--}
+-- | Handle Append Entries response from peer
+-- TRY THIS OUT GABRIEL
+handleAppendEntriesResponseMsg :: ClusterState
+                               -> NodeState a
+                               -> AppendEntriesResponseMsg
+                               -> Process (ClusterState, NodeState a)
+handleAppendEntriesResponseMsg clusterState nodeState
+    (AppendEntriesResponseMsg
+        sender
+        seqno
+        term
+        matchIndex
+        success) = 
+    return (clusterState, nodeState) -- placeholder
+
+
+
 
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do return ()
