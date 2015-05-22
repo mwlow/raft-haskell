@@ -20,7 +20,8 @@ import System.Console.ANSI
 import System.Random.MWC
 import System.Exit
 import System.Posix.Signals
-import Control.Concurrent 
+import Control.Concurrent
+import Control.Concurrent.MVar
 import Control.Monad
 import Control.Applicative
 import Control.Distributed.Process
@@ -173,9 +174,10 @@ data ClusterState = ClusterState
 -- | This is the node's local state.
 data NodeState a = NodeState
     { mainPid      :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , delayPid     :: ProcessId
     , randomGen    :: GenIO         -- ^ Random generator for random events
     
-    , leader       :: NodeId        -- ^ Curent leader
+    , leader       :: NodeId        -- ^ Current leader
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -189,6 +191,7 @@ data NodeState a = NodeState
     , voteCount    :: Int
     }
 
+{-
 -- | Helper Functions
 stepDown :: NodeState a -> Term -> NodeState a
 stepDown nodeState newTerm =
@@ -217,14 +220,14 @@ handleRequestVoteMsg clusterState nodeState
         candidateId 
         lastLogIndex
         lastLogTerm)
-    | term > nCurrentTerm = do
+    | term > nCurrentTerm =
         reply term False >> return (clusterState, stepDown nodeState term)
-    | term < nCurrentTerm = do
+    | term < nCurrentTerm =
         reply nCurrentTerm False >> return (clusterState, nodeState)
     | nVotedFor `elem` [Nothing, Just candidateId] && isUpToDate = do
         let n0 = nodeState { votedFor = Just candidateId }
         reply term True >> return (clusterState, n0)
-    | otherwise = do
+    | otherwise =
         reply nCurrentTerm False >> return (clusterState, nodeState)
   where
     nLog           = log nodeState
@@ -254,12 +257,12 @@ handleRequestVoteResponseMsg clusterState nodeState
         seqno 
         term 
         granted)
-    | term > nCurrentTerm = do
+    | term > nCurrentTerm =
         return (clusterState, stepDown nodeState term)
     | otherwise =
         case nState of
             Candidate ->
-                if nCurrentTerm == term && granted == True
+                if nCurrentTerm == term && granted
                     then return (clusterState 
                                , nodeState { voteCount = nVoteCount + 1 })
                     else return (clusterState, nodeState)
@@ -293,8 +296,8 @@ handleAppendEntriesMsg clusterState nodeState
         return (clusterState, nodeState)
     | otherwise = do 
         let n0 = nodeState { leader = leaderId, state = Follower }
-        case success of
-            True -> do 
+        if success 
+            then do 
                 let oldLog = log nodeState
                     newLog = appendLog oldLog entries prevLogIndex
                     index = IntMap.size newLog
@@ -304,7 +307,7 @@ handleAppendEntriesMsg clusterState nodeState
                          }
                 reply nCurrentTerm index True
                 return (clusterState, n0)
-            False -> do
+            else do
                 reply nCurrentTerm 0 False
                 return (clusterState, nodeState)
   where
@@ -355,11 +358,61 @@ handleAppendEntriesResponseMsg clusterState nodeState
         success) = 
     return (clusterState, nodeState) -- placeholder
 
+-}
+
+-- 
+-- election thread
+-- electionTimeout Thread
+-- raftLoop: handles receiving rpcs
+
+
+-- | Helper function to acquire locks in the Process Monad
+withLocks :: MVar ClusterState 
+          -> MVar (NodeState a)
+          -> (ClusterState -> NodeState a -> IO b)
+          -> Process b
+withLocks mc mn f = liftIO $ withMVar mc $ \c -> withMVar mn $ \n -> f c n
+
+-- | Like 'withLocks', but the IO action in the third argument is executed 
+-- with asynchronous exceptions masked.
+withLocksM :: MVar ClusterState 
+           -> MVar (NodeState a)
+           -> (ClusterState -> NodeState a -> IO b)
+           -> Process b
+withLocksM mc mn f = 
+    liftIO $ withMVarMasked mc $ \c -> withMVarMasked mn $ \n -> f c n
+
+
+
+
+delayThread :: 
+
+-- | Main loop of the program
+raftThread :: MVar ClusterState
+           -> MVar (NodeState a)
+           -> Process (MVar ClusterState, MVar (NodeState a))
+raftThread mc mn = do
+    -- Die when parent does
+    withLocksM mc mn (\c n -> return $ mainPid n) >>= link
+
+    -- Choose election timeout between 150ms and 300ms
+    timeout <- withLocksM mc mn $ \c n -> 
+                   uniformR (150000, 300000) (randomGen n) :: IO Int
+
+    -- Restart election delay thread
+    withLocksM mc mn (\c n -> return $ delayPid n) >>= kill "restart"
+    delayPid <- spawnLocal (delayThread mc mn timeout)
+    withLocksM 
+
+    return (mc, mn)
 
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
-initRaft backend nodes = do return ()
+initRaft backend nodes = return ()
+
+
+
 
 
 {-
