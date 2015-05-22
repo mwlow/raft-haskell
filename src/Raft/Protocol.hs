@@ -32,14 +32,16 @@ import Text.Printf
 import Data.Binary
 import Data.Typeable
 import Data.List
+import Safe
 import qualified Data.Set as Set
+import qualified Data.IntMap as IntMap
 import qualified Data.Map as Map
 import GHC.Generics (Generic)
 
 -- | Type renaming to make things clearer.
 type Term = Int
 type Index = Int
-type Log a = [LogEntry a]
+type Log a = IntMap.IntMap (LogEntry a)
 
 data ServerRole = Follower | Candidate | Leader deriving (Show, Read, Eq)
 
@@ -53,15 +55,14 @@ instance (Binary a) => Binary (Command a) where
 
 -- | An entry in a log, clearly. Also serializable.
 data LogEntry a = LogEntry 
-    { index          :: Index
-    , termReceived   :: Term
+    { termReceived   :: Term
     , committed      :: Bool
     , command        :: Command a
     } deriving (Show, Read, Eq, Typeable)
 
 instance (Binary a) => Binary (LogEntry a) where
-    put (LogEntry a b c d) = put a >> put b >> put c >> put d
-    get = LogEntry <$> get <*> get <*> get <*> get 
+    put (LogEntry a b c) = put a >> put b >> put c
+    get = LogEntry <$> get <*> get <*> get
 
 -- | Data structure for appendEntriesRPC. Is serializable.
 data AppendEntriesMsg a = AppendEntriesMsg 
@@ -95,12 +96,12 @@ instance Binary AppendEntriesResponseMsg where
 
 -- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
-    { rvSender      :: ProcessId  -- ^ Sender's process id
-    , rvSeqno       :: Int        -- ^ Sequence number, for matching replies
-    , rvTerm        :: Term       -- ^ Candidate's term
-    , candidateId   :: NodeId     -- ^ Candidate requesting vote
-    , lastLogIndex  :: Index      -- ^ Index of candidate's last log entry
-    , lastLogTerm   :: Term       -- ^ Term of candidate's last log entry
+    { rvSender      :: ProcessId   -- ^ Sender's process id
+    , rvSeqno       :: Int         -- ^ Sequence number, for matching replies
+    , rvTerm        :: Term        -- ^ Candidate's term
+    , candidateId   :: NodeId      -- ^ Candidate requesting vote
+    , lastLogIndex  :: Index       -- ^ Index of candidate's last log entry
+    , lastLogTerm   :: Term        -- ^ Term of candidate's last log entry
     } deriving (Show, Eq, Typeable)
 
 instance Binary RequestVoteMsg where
@@ -188,14 +189,17 @@ data NodeState a = NodeState
 -- | Helper Functions
 stepDown :: NodeState a -> Term -> NodeState a
 stepDown nodeState newTerm =
-    nodeState 
-    { currentTerm = newTerm
-    , state = Follower
-    , votedFor = Nothing
-    }
+    nodeState { currentTerm = newTerm
+              , state       = Follower
+              , votedFor    = Nothing
+              , voteCount   = 0
+              }
 
 logTerm :: NodeState a -> Index -> Term
-logTerm nodeState index = termReceived $ (log nodeState) !! index
+logTerm nodeState index
+    | index < 1 = 0
+    | index > IntMap.size (log nodeState) = 0
+    | otherwise = termReceived ((log nodeState) IntMap.! index)
 
 
 -- | Handle Request Vote request from peer
@@ -203,53 +207,117 @@ handleRequestVoteMsg :: ClusterState
                      -> NodeState a 
                      -> RequestVoteMsg
                      -> Process (ClusterState, NodeState a)
-handleRequestVoteMsg 
-    clusterState
-    nodeState
-    (RequestVoteMsg sender seqno term candidateId lastLogIndex lastLogTerm)
-    | nCurrentTerm < term = do
-        let n0 = stepDown nodeState term
-        reply term False
-        return (clusterState, n0)
-    | nCurrentTerm == term &&
-      (nVotedFor == Nothing || nVotedFor == Just candidateId) &&
-      (lastLogTerm > nLastLogTerm ||
-       (lastLogTerm == nLastLogTerm && 
-        lastLogIndex >= length nLog)) = do
+handleRequestVoteMsg clusterState nodeState
+    (RequestVoteMsg 
+        sender 
+        seqno 
+        term 
+        candidateId 
+        lastLogIndex
+        lastLogTerm)
+    | term < nCurrentTerm = do
+        reply nCurrentTerm False >> return (clusterState, nodeState)
+    | term > nCurrentTerm = do
+        reply term False >> return (clusterState, stepDown nodeState term)
+    | nVotedFor `elem` [Nothing, Just candidateId] && isUpToDate = do
         let n0 = nodeState { votedFor = Just candidateId }
-        reply term True
-        return (clusterState, n0)
+        reply term True >> return (clusterState, n0)
     | otherwise = do
-        reply term False
-        return (clusterState, nodeState)
+        reply nCurrentTerm False >> return (clusterState, nodeState)
   where
-    nLog = log nodeState
-    nVotedFor = votedFor nodeState
-    nCurrentTerm = currentTerm nodeState
-    nLastLogTerm = termReceived (last nLog)
+    nLog           = log nodeState
+    nLogSize       = IntMap.size nLog
+    nVotedFor      = votedFor nodeState
+    nCurrentTerm   = currentTerm nodeState
+    nLastLogTerm   = logTerm nodeState nLogSize
+
+    isUpToDate :: Bool
+    isUpToDate = lastLogTerm > nLastLogTerm || 
+        (lastLogTerm == nLastLogTerm && lastLogIndex >= nLogSize)
+
     reply :: Term -> Bool -> Process ()
     reply term granted = do
         self <- getSelfPid
         send sender (RequestVoteResponseMsg self seqno term granted)
+
 
 -- | Handle Request Vote response from peer
 handleRequestVoteResponseMsg :: ClusterState
                              -> NodeState a
                              -> RequestVoteResponseMsg
                              -> Process (ClusterState, NodeState a)
-handleRequestVoteResponseMsg 
-    clusterState
-    nodeState
-    (RequestVoteResponseMsg sender seqno term granted) =
- --       case granted of
- --           True -> 
- --               if currentTerm nodeState == term
- --                   then return (clusterState, nodeState & voteCount %~ (+1))
- --                   else return (clusterState, nodeState)
- --           False ->
- --               return (clusterState, nodeState)
-    return (clusterState, nodeState)
+handleRequestVoteResponseMsg clusterState nodeState
+    (RequestVoteResponseMsg 
+        sender 
+        seqno 
+        term 
+        granted)
+    | term > nCurrentTerm = do
+        return (clusterState, stepDown nodeState term)
+    | otherwise =
+        case nState of
+            Candidate ->
+                if nCurrentTerm == term && granted == True
+                    then return (clusterState 
+                               , nodeState { voteCount = nVoteCount + 1 })
+                    else return (clusterState, nodeState)
+            other@_   -> return (clusterState, nodeState)
+  where
+    nState         = state nodeState
+    nCurrentTerm   = currentTerm nodeState
+    nVoteCount     = voteCount nodeState
 
+-- | Handle Append Entries request from peer
+handleAppendEntriesMsg :: ClusterState
+                       -> NodeState a
+                       -> AppendEntriesMsg a
+                       -> Process (ClusterState, NodeState a)
+handleAppendEntriesMsg clusterState nodeState
+    (AppendEntriesMsg
+        sender
+        seqno
+        term
+        leaderId
+        prevLogIndex
+        prevLogTerm
+        entries
+        leaderCommit)
+
+    | nCurrentTerm < term = do
+        let n0 = stepDown nodeState term
+        return (clusterState, n0)
+    | nCurrentTerm > term = do
+        reply nCurrentTerm False
+        return (clusterState, nodeState)
+
+
+    | otherwise = do return (clusterState, nodeState)
+  where
+    nState         = state nodeState
+    nLog           = log nodeState
+    nVotedFor      = votedFor nodeState
+    nCurrentTerm   = currentTerm nodeState
+    nLastLogTerm   = termReceived (last nLog)
+    reply :: Term -> Bool -> Process ()
+    reply term granted = do
+        self <- getSelfPid
+        send sender (AppendEntriesResponseMsg self seqno term granted)
+
+
+{-
+-- | Data structure for appendEntriesRPC. Is serializable.
+data AppendEntriesMsg a = AppendEntriesMsg 
+    { aeSender       :: ProcessId -- ^ Sender's process id
+    , aeSeqno        :: Int       -- ^ Sequence number, for matching replies
+    , aeTerm         :: Term      -- ^ Leader's term
+    , leaderId       :: NodeId    -- ^ Leader's Id
+    , prevLogIndex   :: Index     -- ^ Log entry index right before new ones
+    , prevLogTerm    :: Term      -- ^ Term of the previous log entry
+    , entries        :: Log a     -- ^ Log entries to store, [] for heartbeat
+    , leaderCommit   :: Index     -- ^ Leader's commit index
+    } deriving (Show, Eq, Typeable)
+
+-}
 
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do return ()
