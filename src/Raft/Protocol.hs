@@ -29,6 +29,7 @@ import Control.Distributed.Process.Extras (isProcessAlive)
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process.Serializable
+import Control.Distributed.Process.Internal.Types
 import Text.Printf
 import Data.Binary
 import Data.Typeable
@@ -165,8 +166,8 @@ data ClusterState = ClusterState
     , selfNodeId  :: NodeId                   -- ^ nodeId of current server
     , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
     , peers       :: [NodeId]                 -- ^ nodeIds \\ [selfNodeId]
-    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
-    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+--    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+--    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
 
     , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
     , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
@@ -174,6 +175,22 @@ data ClusterState = ClusterState
     , randomGen   :: GenIO         -- ^ Random generator for random events
     }
 
+newCluster :: Backend -> [LocalNode] -> Process (ClusterState)
+newCluster backend nodes = do 
+    selfPid   <- getSelfPid
+    randomGen <- liftIO createSystemRandom
+    
+    return ClusterState {
+        backend    = backend
+      , numNodes   = length nodes
+      , selfNodeId = processNodeId selfPid
+      , nodeIds    = localNodeId <$> nodes 
+      , peers      = (localNodeId <$> nodes) \\ [processNodeId selfPid]
+      , mainPid    = selfPid
+      , raftPid    = selfPid
+      , delayPid   = nullProcessId (processNodeId selfPid)
+      , randomGen  = randomGen
+    }
 
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
@@ -186,12 +203,25 @@ data RaftState a = RaftState
     , commitIndex     :: Index
     , lastApplied     :: Index
 
-    , nextIndexMap    :: Map.Map NodeId Index
-    , matchIndexMap   :: Map.Map NodeId Index
+    , nextIndexMap    :: Map.Map NodeId Index --TODO: Should this include self?
+    , matchIndexMap   :: Map.Map NodeId Index --TODO: Should this include self?
 
     , voteCount       :: Int
     }
 
+newRaftState :: [LocalNode] -> RaftState a
+newRaftState nodes = RaftState {
+        leader        = Nothing
+      , state         = Follower
+      , currentTerm   = 0
+      , votedFor      = Nothing
+      , log           = IntMap.empty 
+      , commitIndex   = 0
+      , lastApplied   = 0
+      , nextIndexMap  = Map.fromList $ zip (localNodeId <$> nodes) [1, 1..]
+      , matchIndexMap = Map.fromList $ zip (localNodeId <$> nodes) [0, 0..]
+      , voteCount     = 0
+    }
 
 -- | Helper Functions
 stepDown :: RaftState a -> Term -> RaftState a
