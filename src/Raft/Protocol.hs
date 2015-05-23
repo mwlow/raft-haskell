@@ -177,18 +177,18 @@ data ClusterState = ClusterState
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader       :: Maybe NodeId               
-    , state        :: ServerRole
-    , currentTerm  :: Term
-    , votedFor     :: Maybe NodeId
-    , log          :: Log a
-    , commitIndex  :: Index
-    , lastApplied  :: Index
+    { leader          :: Maybe NodeId               
+    , state           :: ServerRole
+    , currentTerm     :: Term
+    , votedFor        :: Maybe NodeId
+    , log             :: Log a
+    , commitIndex     :: Index
+    , lastApplied     :: Index
 
     , nextIndexMap    :: Map.Map NodeId Index
     , matchIndexMap   :: Map.Map NodeId Index
 
-    , voteCount    :: Int
+    , voteCount       :: Int
     }
 
 
@@ -215,7 +215,7 @@ handleRequestVoteMsg :: ClusterState
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    send (rvSender msg) (RequestVoteResponseMsg (mainPid c) t g)
+    send (rvSender msg) (RequestVoteResponseMsg (raftPid c) t g)
   where
     handleMsg :: ClusterState
               -> RaftState a 
@@ -225,7 +225,9 @@ handleRequestVoteMsg c mr msg = do
         (RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
         | term > rCurrentTerm = return (stepDown r term, (term, False))
         | term < rCurrentTerm = return (r, (rCurrentTerm, False))
-        | rVotedFor `elem` [Nothing, Just candidateId] && isUpToDate =
+        | rVotedFor `elem` [Nothing, Just candidateId] && 
+            (lastLogTerm > rLastLogTerm || 
+                (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)) =
             return (r { votedFor = Just candidateId }, (term, True))
         | otherwise = return (r, (rCurrentTerm, False))
       where
@@ -234,10 +236,6 @@ handleRequestVoteMsg c mr msg = do
         rVotedFor      = votedFor r
         rCurrentTerm   = currentTerm r
         rLastLogTerm   = logTerm (log r) rLogSize
-
-        isUpToDate :: Bool
-        isUpToDate = lastLogTerm > rLastLogTerm || 
-            (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)
 
 
 -- | Handle Request Vote response from peer
@@ -262,97 +260,51 @@ handleRequestVoteResponseMsg c mr msg = do
         rCurrentTerm   = currentTerm r
         rVoteCount     = voteCount r
 
-{-
-
-    (RequestVoteResponseMsg 
-        sender 
-        term 
-        granted)
-    | term > nCurrentTerm =
-        return (clusterState, stepDown nodeState term)
-    | otherwise =
-        case nState of
-            Candidate ->
-                if nCurrentTerm == term && granted
-                    then return (clusterState 
-                               , nodeState { voteCount = nVoteCount + 1 })
-                    else return (clusterState, nodeState)
-            other@_   -> return (clusterState, nodeState)
-  where
-    nState         = state nodeState
-    nCurrentTerm   = currentTerm nodeState
-    nVoteCount     = voteCount nodeState
--}
 
 -- | Handle Append Entries request from peer
 handleAppendEntriesMsg :: ClusterState
                        -> MVar (RaftState a)
                        -> AppendEntriesMsg a
                        -> Process ()
-handleAppendEntriesMsg c mr
-    (AppendEntriesMsg
-        sender
-        term
-        leaderId
-        prevLogIndex
-        prevLogTerm
-        entries
-        leaderCommit) = return ()
-    {-
-    | term > nCurrentTerm = do
-        reply term 0 False
-        return (clusterState, stepDown nodeState term)
-    | nCurrentTerm > term = do
-        reply nCurrentTerm 0 False
-        return (clusterState, nodeState)
-    | otherwise = do 
-        let n0 = nodeState { leader = leaderId, state = Follower }
-        if success 
-            then do 
-                let oldLog = log nodeState
-                    newLog = appendLog oldLog entries prevLogIndex
-                    index = IntMap.size newLog
-                    n0 = nodeState 
-                         { log = newLog
-                         , commitIndex = min leaderCommit index
-                         }
-                reply nCurrentTerm index True
-                return (clusterState, n0)
-            else do
-                reply nCurrentTerm 0 False
-                return (clusterState, nodeState)
+handleAppendEntriesMsg c mr msg = do
+    (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
-    nLog           = log nodeState
-    nLogSize       = IntMap.size nLog
-    nVotedFor      = votedFor nodeState
-    nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = logTerm (log nodeState) nLogSize
-
-    success :: Bool
-    success = prevLogIndex == 0 ||
-                (prevLogIndex <= nLogSize && 
-                 logTerm (log nodeState) prevLogIndex == prevLogIndex)
-
-    reply :: Term -> Index -> Bool -> Process ()
-    reply term matchIndex granted = do
-        self <- getSelfPid
-        send sender (AppendEntriesResponseMsg self seqno term matchIndex granted)
-
-    appendLog :: Log a -> Log a -> Index -> Log a
-    appendLog dstLog srcLog prevLogIndex
-        | IntMap.null srcLog = dstLog
-        | otherwise = 
-            if logTerm dstLog index /= termReceived headSrcLog
-                then appendLog (IntMap.insert index headSrcLog dstLog)
-                                tailSrcLog
-                                index
-                else appendLog dstLog tailSrcLog index
+    handleMsg :: ClusterState
+              -> RaftState a 
+              -> AppendEntriesMsg a
+              -> IO (RaftState a, (Term, Bool, Index))
+    handleMsg c r 
+        (AppendEntriesMsg
+            sender term leaderId prevLogIndex prevLogTerm entries leaderCommit)
+        | term > rCurrentTerm = return (stepDown r term, (term, False, 0))
+        | term < rCurrentTerm = return (r, (rCurrentTerm, False, 0))
+        | prevLogIndex == 0 || 
+            (prevLogIndex <= rLogSize && 
+                logTerm (log r) prevLogIndex == prevLogIndex) = do
+            let rLog0 = appendLog rLog entries prevLogIndex
+                index = IntMap.size rLog0
+                r0    = r { log = rLog0, commitIndex = min leaderCommit index }
+            return (r0, (rCurrentTerm, True, index))
+        | otherwise = return (r, (rCurrentTerm, False, 0))
       where
-        index = prevLogIndex + 1
-        ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
-        -- TODO This is currently O(n)
-        initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
--}
+        rLog           = log r
+        rLogSize       = IntMap.size rLog
+        rVotedFor      = votedFor r
+        rCurrentTerm   = currentTerm r
+        rLastLogTerm   = logTerm (log r) rLogSize
+        appendLog :: Log a -> Log a -> Index -> Log a
+        appendLog dstLog srcLog prevLogIndex
+            | IntMap.null srcLog = dstLog
+            | logTerm dstLog index /= termReceived headSrcLog = 
+                appendLog (IntMap.insert index headSrcLog dstLog) tailSrcLog index
+            | otherwise = appendLog dstLog tailSrcLog index
+          where
+            index = prevLogIndex + 1
+            ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
+            -- TODO This is currently O(n)
+            initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
+            
 
 -- | Handle Append Entries response from peer
 -- TRY THIS OUT GABRIEL
