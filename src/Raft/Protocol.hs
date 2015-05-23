@@ -23,6 +23,7 @@ import System.Posix.Signals
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Monad
+import Control.Monad.Trans
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Extras (isProcessAlive)
@@ -88,7 +89,7 @@ data AppendEntriesResponseMsg = AppendEntriesResponseMsg
     { aerSender     :: ProcessId  -- ^ Sender's process id
     , aerSeqno      :: Int        -- ^ Sequence number, for matching replies
     , aerTerm       :: Term       -- ^ Current term to update leader
-    , aerMatchIndex :: Index   -- ^ Index of highest log entry replicated
+    , aerMatchIndex :: Index      -- ^ Index of highest log entry replicated
     , success       :: Bool       -- ^ Did follower contain a matching entry?
     } deriving (Show, Eq, Typeable)
 
@@ -168,10 +169,12 @@ recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 data ClusterState = ClusterState 
     { backend     :: Backend                  -- ^ Backend for the topology
     , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
+    , selfNodeId  :: NodeId                   -- ^ nodeId of current server 
     , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
     , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
 
-    , mainPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
+    , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
     , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
     , electionPid :: ProcessId     -- ^ ProcessId of the election starter thread
     , randomGen   :: GenIO         -- ^ Random generator for random events
@@ -181,7 +184,7 @@ data ClusterState = ClusterState
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader       :: NodeId                  -- ^ Current leader
+    { leader       :: NodeId                  
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -195,11 +198,11 @@ data RaftState a = RaftState
     , voteCount    :: Int
     }
 
-{-
+
 -- | Helper Functions
-stepDown :: NodeState a -> Term -> NodeState a
-stepDown nodeState newTerm =
-    nodeState { currentTerm = newTerm
+stepDown :: RaftState a -> Term -> RaftState a
+stepDown raftState newTerm =
+    raftState { currentTerm = newTerm
               , state       = Follower
               , votedFor    = Nothing
               , voteCount   = 0
@@ -213,9 +216,9 @@ logTerm log index
 
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
-                     -> NodeState a 
+                     -> RaftState a 
                      -> RequestVoteMsg
-                     -> Process (ClusterState, NodeState a)
+                     -> Process (ClusterState, RaftState a)
 handleRequestVoteMsg clusterState nodeState
     (RequestVoteMsg 
         sender 
@@ -252,9 +255,9 @@ handleRequestVoteMsg clusterState nodeState
 
 -- | Handle Request Vote response from peer
 handleRequestVoteResponseMsg :: ClusterState
-                             -> NodeState a
+                             -> RaftState a
                              -> RequestVoteResponseMsg
-                             -> Process (ClusterState, NodeState a)
+                             -> Process (ClusterState, RaftState a)
 handleRequestVoteResponseMsg clusterState nodeState
     (RequestVoteResponseMsg 
         sender 
@@ -279,9 +282,9 @@ handleRequestVoteResponseMsg clusterState nodeState
 
 -- | Handle Append Entries request from peer
 handleAppendEntriesMsg :: ClusterState
-                       -> NodeState a
+                       -> RaftState a
                        -> AppendEntriesMsg a
-                       -> Process (ClusterState, NodeState a)
+                       -> Process (ClusterState, RaftState a)
 handleAppendEntriesMsg clusterState nodeState
     (AppendEntriesMsg
         sender
@@ -350,9 +353,9 @@ handleAppendEntriesMsg clusterState nodeState
 -- | Handle Append Entries response from peer
 -- TRY THIS OUT GABRIEL
 handleAppendEntriesResponseMsg :: ClusterState
-                               -> NodeState a
+                               -> RaftState a
                                -> AppendEntriesResponseMsg
-                               -> Process (ClusterState, NodeState a)
+                               -> Process (ClusterState, RaftState a)
 handleAppendEntriesResponseMsg clusterState nodeState
     (AppendEntriesResponseMsg
         sender
@@ -362,7 +365,6 @@ handleAppendEntriesResponseMsg clusterState nodeState
         success) = 
     return (clusterState, nodeState) -- placeholder
 
--}
 
 -- 
 -- election thread
@@ -370,41 +372,39 @@ handleAppendEntriesResponseMsg clusterState nodeState
 -- raftLoop: handles receiving rpcs
 
 
--- | Acquire lock in the Process Monad
-withLock :: MVar a -> (a -> IO b) -> Process b
-withLock mn f = liftIO $ withMVar mn f
-
-
--- | Like 'withLock', but the IO action in the third argument is executed 
--- with asynchronous exceptions masked.
-withLockM :: MVar a -> (a -> IO b) -> Process b
-withLockM mn f = liftIO $ withMVarMasked mn f
-
-
 
 -- | This thread starts a new election.
 electionThread :: ClusterState -> MVar (RaftState a) -> Process ()
-electionThread c mn = do
+electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
-    selfNodeId <- getSelfNode
-    withLockM mn $ \n -> do
-        -- Promote to Candidate
-        let n0 = n { state       = Candidate 
-                   , votedFor    = Just selfNodeId
-                   , currentTerm = 1 + currentTerm n
-                   , voteCount   = 1
-                   }
+    liftIO $ modifyMVarMasked_ mr $ \r -> do
+        if state r == Leader
+            then return r
+            else 
+                let r0 = r { state       = Candidate 
+                           , votedFor    = Just $ selfNodeId c
+                           , currentTerm = 1 + currentTerm r
+                           , voteCount   = 1
+                           , matchIndex  = Map.fromList $ zip (nodeIds c) [0, 0..]
+                           , nextIndex   = Map.fromList $ zip (nodeIds c) [1, 1..]
+                           }
+                in return r0
 
-        return ()
-
+                RequestVoteMsg { rvSender     = raftPid c 
+                               , rvSeqno      = 0
+                               , rvTerm       = currentTerm r0
+                               , candidateId  = selfNodeId c
+                               , lastLogIndex = IntMap.size $ log r
+                               , lastLogTerm  = logTerm (log r) (IntMap.size $ log r)
+                               }
     return ()
 
 
 -- | This thread starts the election timer if it is not killed before then.
 delayThread :: ClusterState -> MVar (RaftState a) -> Int -> Process ()
-delayThread c mn t = do
+delayThread c mr t = do
     -- Die when parent does
     link $ mainPid c
 
@@ -412,7 +412,7 @@ delayThread c mn t = do
     liftIO $ threadDelay t
 
     -- Spawn thread that starts election
-    delayPid <- spawnLocal (electionThread c mn)
+    delayPid <- spawnLocal $ electionThread c mr
 
     return ()
 
@@ -421,7 +421,7 @@ delayThread c mn t = do
 raftThread :: ClusterState
            -> MVar (RaftState a)
            -> Process (ClusterState, MVar (RaftState a))
-raftThread c mn = do
+raftThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
@@ -430,10 +430,10 @@ raftThread c mn = do
 
     -- Restart election delay thread
     kill (delayPid c) "restart"
-    delayPid <- spawnLocal (delayThread c mn timeout)
+    delayPid <- spawnLocal $ delayThread c mr timeout
     let c0 = c { delayPid = delayPid }
 
-    return (c, mn)
+    return (c, mr)
 
 
 
