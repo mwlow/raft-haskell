@@ -282,8 +282,8 @@ handleRequestVoteResponseMsg c mr msg =
               -> RaftState a 
               -> RequestVoteResponseMsg 
               -> IO (RaftState a)
-    handleMsg c r (RequestVoteResponseMsg sender term granted)
-        | term > rCurrentTerm = return $ stepDown r term
+    handleMsg c r msg@(RequestVoteResponseMsg sender term granted)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | rState == Candidate && rCurrentTerm == term && granted =
             return r { voteCount = rVoteCount + 1 }
         | otherwise = return r
@@ -307,9 +307,9 @@ handleAppendEntriesMsg c mr msg = do
               -> AppendEntriesMsg a
               -> IO (RaftState a, (Term, Bool, Index))
     handleMsg c r 
-        (AppendEntriesMsg
+        msg@(AppendEntriesMsg
             sender term leaderId prevLogIndex prevLogTerm entries leaderCommit)
-        | term > rCurrentTerm = return (stepDown r term, (term, False, 0))
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | term < rCurrentTerm = return (r, (rCurrentTerm, False, 0))
         | prevLogIndex == 0 || 
             (prevLogIndex <= rLogSize && 
