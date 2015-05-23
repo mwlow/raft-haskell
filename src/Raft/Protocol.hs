@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
 --Notes: use txt file as state-machine? Therefore we can write a second program
@@ -208,15 +207,15 @@ logTerm log index
     | index > IntMap.size log = 0
     | otherwise = termReceived (log IntMap.! index)
 
+
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
                      -> MVar (RaftState a) 
                      -> RequestVoteMsg
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
-    (t, g) <- liftIO $ withMVarMasked mr $ \r -> handleMsg c r msg
+    (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
     send (rvSender msg) (RequestVoteResponseMsg (mainPid c) t g)
-    return ()
   where
     handleMsg :: ClusterState 
               -> RaftState a 
@@ -228,7 +227,7 @@ handleRequestVoteMsg c mr msg = do
         | term < rCurrentTerm = return (r, (rCurrentTerm, False))
         | rVotedFor `elem` [Nothing, Just candidateId] && isUpToDate =
             return (r { votedFor = Just candidateId }, (term, True))
-        | otherwise = return (r, (rCurrentTerm False))
+        | otherwise = return (r, (rCurrentTerm, False))
       where
         rLog           = log r
         rLogSize       = IntMap.size rLog
@@ -240,14 +239,7 @@ handleRequestVoteMsg c mr msg = do
         isUpToDate = lastLogTerm > rLastLogTerm || 
             (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)
 
-{-
 
-    reply :: Term -> Bool -> Process ()
-    reply term granted = do
-        self <- getSelfPid
-        send sender (RequestVoteResponseMsg self seqno term granted)
-
--}
 -- | Handle Request Vote response from peer
 handleRequestVoteResponseMsg :: ClusterState
                              -> RaftState a
@@ -256,7 +248,6 @@ handleRequestVoteResponseMsg :: ClusterState
 handleRequestVoteResponseMsg clusterState nodeState
     (RequestVoteResponseMsg 
         sender 
-        seqno 
         term 
         granted)
     | term > nCurrentTerm =
@@ -283,7 +274,6 @@ handleAppendEntriesMsg :: ClusterState
 handleAppendEntriesMsg c mr
     (AppendEntriesMsg
         sender
-        seqno
         term
         leaderId
         prevLogIndex
@@ -355,7 +345,6 @@ handleAppendEntriesResponseMsg :: ClusterState
 handleAppendEntriesResponseMsg clusterState nodeState
     (AppendEntriesResponseMsg
         sender
-        seqno
         term
         matchIndex
         success) = 
@@ -389,7 +378,6 @@ electionThread c mr = do
                            }
                     msg = RequestVoteMsg 
                            { rvSender     = raftPid c 
-                           , rvSeqno      = 0
                            , rvTerm       = currentTerm r0
                            , candidateId  = selfNodeId c
                            , lastLogIndex = IntMap.size $ log r
