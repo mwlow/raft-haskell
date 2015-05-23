@@ -192,8 +192,8 @@ data RaftState a = RaftState
     , commitIndex  :: Index
     , lastApplied  :: Index
 
-    , nextIndex    :: Map.Map NodeId Index
-    , matchIndex   :: Map.Map NodeId Index
+    , nextIndexMap    :: Map.Map NodeId Index
+    , matchIndexMap   :: Map.Map NodeId Index
 
     , voteCount    :: Int
     }
@@ -356,21 +356,31 @@ handleAppendEntriesResponseMsg :: ClusterState
                                -> RaftState a
                                -> AppendEntriesResponseMsg
                                -> Process (ClusterState, RaftState a)
-handleAppendEntriesResponseMsg clusterState nodeState
+handleAppendEntriesResponseMsg clusterState raftState
     (AppendEntriesResponseMsg
         sender
         seqno
         term
         matchIndex
-        success) = 
-    return (clusterState, nodeState) -- placeholder
-
-
--- 
--- election thread
--- electionTimeout Thread
--- raftLoop: handles receiving rpcs
-
+        success) 
+    |  term > nCurrentTerm =
+        return (clusterState, stepDown raftState term)
+    | otherwise =
+        case nState of
+            Candidate ->
+                if nCurrentTerm == term && success
+                    then return (clusterState 
+                               , raftState { matchIndexMap = 
+                                                Map.insert (processNodeId sender) matchIndex (matchIndexMap raftState),
+                                             nextIndexMap = 
+                                                Map.insert (processNodeId sender) (matchIndex + 1) (nextIndexMap raftState)})
+                    else return (clusterState, 
+                                raftState{
+                                nextIndexMap = Map.insert (processNodeId sender) 1 (nextIndexMap raftState)})
+            other@_   -> return (clusterState, raftState)
+    where 
+        nState         = state raftState
+        nCurrentTerm   = currentTerm raftState
 
 
 -- | This thread starts a new election.
@@ -387,8 +397,8 @@ electionThread c mr = do
                            , votedFor    = Just $ selfNodeId c
                            , currentTerm = 1 + currentTerm r
                            , voteCount   = 1
-                           , matchIndex  = Map.fromList $ zip (nodeIds c) [0, 0..]
-                           , nextIndex   = Map.fromList $ zip (nodeIds c) [1, 1..]
+                           , matchIndexMap  = Map.fromList $ zip (nodeIds c) [0, 0..]
+                           , nextIndexMap   = Map.fromList $ zip (nodeIds c) [1, 1..]
                            }
                 in return r0
 
