@@ -216,7 +216,7 @@ logTerm log index
 
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
-                     -> RaftState a 
+                     -> MVar (RaftState a) 
                      -> RequestVoteMsg
                      -> Process (ClusterState, RaftState a)
 handleRequestVoteMsg clusterState nodeState
@@ -282,10 +282,10 @@ handleRequestVoteResponseMsg clusterState nodeState
 
 -- | Handle Append Entries request from peer
 handleAppendEntriesMsg :: ClusterState
-                       -> RaftState a
+                       -> MVar (RaftState a)
                        -> AppendEntriesMsg a
-                       -> Process (ClusterState, RaftState a)
-handleAppendEntriesMsg clusterState nodeState
+                       -> Process ()
+handleAppendEntriesMsg c mr
     (AppendEntriesMsg
         sender
         seqno
@@ -294,7 +294,8 @@ handleAppendEntriesMsg clusterState nodeState
         prevLogIndex
         prevLogTerm
         entries
-        leaderCommit)
+        leaderCommit) = return ()
+    {-
     | term > nCurrentTerm = do
         reply term 0 False
         return (clusterState, stepDown nodeState term)
@@ -348,7 +349,7 @@ handleAppendEntriesMsg clusterState nodeState
         ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
         -- TODO This is currently O(n)
         initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
-
+-}
 
 -- | Handle Append Entries response from peer
 -- TRY THIS OUT GABRIEL
@@ -426,14 +427,12 @@ delayThread c mr t = do
 
 
 -- | Main loop of the program.
-raftThread :: ClusterState
-           -> MVar (RaftState a)
-           -> Process (ClusterState, MVar (RaftState a))
+raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
     -- Die when parent does
     link $ mainPid c
-
-    -- Choose election timeout between 150ms and 300ms
+   
+   -- Choose election timeout between 150ms and 300ms
     timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
 
     -- Restart election delay thread
@@ -441,8 +440,21 @@ raftThread c mr = do
     delayPid <- spawnLocal $ delayThread c mr timeout
     let c0 = c { delayPid = delayPid }
 
-    return (c, mr)
+    -- Block for RPC Messages
+    msg <- receiveWait
+      [ match recvAppendEntriesMsg
+      , match recvAppendEntriesResponseMsg
+      , match recvRequestVoteMsg
+      , match recvRequestVoteResponseMsg ]
 
+    -- Handle RPC Message
+    case msg of
+        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c mr m
+        RpcRequestVoteMsg m -> handleRequestVoteMsg c mr m
+        other@_ -> return ()
+
+
+    return ()
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
