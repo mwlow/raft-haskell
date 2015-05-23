@@ -184,7 +184,7 @@ data ClusterState = ClusterState
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader       :: NodeId                  
+    { leader       :: Maybe NodeId                  
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -472,11 +472,62 @@ raftThread c mr = do
 
     return ()
 
+rpcThread :: ClusterState -> MVar (RaftState a) -> Process ()
+rpcThread c mr = return()
 
 initRaft :: Backend -> [LocalNode] -> Process ()
-initRaft backend nodes = return ()
+initRaft backend nodes = do
+    selfPid <- getSelfPid
 
+     -- Initialize state
+    randomGen <- liftIO createSystemRandom
+    let 
+        clusterState = ClusterState{
+            backend = backend
+            ,selfNodeId  = selfPid                -- ^ nodeId of current server
+            , nodeIds   = localNodeId <$> nodes                -- ^ List of nodeIds in the topology
+            , peers       = nodeIds \\ [selfNodeId]                -- ^ nodeIds \\ [selfNodeId]
+            , knownIds    = Map.empty-- ^ Map of known processIds
+            , unknownIds  = Map.empty -- ^ Map of unknown processIds
+            , mainPid     = selfPid -- ^ ProcessId of the master thread
+            , raftPid     = selfPid  -- ^ ProcessId of the thread running Raft
+            , delayPid    = selfPid -- ^ ProcessId of the delay thread
+            , randomGen   = randomGen        -- ^ Random generator for random events
+        }
 
+        raftState = RaftState{ 
+            leader         = Nothing            
+            , state        = Follower
+            , currentTerm  = 0
+            , votedFor     = Nothing
+            , log          = IntMap.empty
+            , commitIndex  = 0
+            , lastApplied  = 0
+
+            , nextIndexMap    = Map.empty
+            , matchIndexMap   = Map.empty
+
+            , voteCount    = 0
+        }
+
+     -- Start process for handling messages and register it
+    serverPid <- spawnLocal (raftLoop clusterState raftState)
+    reg <- whereis "server"
+    case reg of
+        Nothing -> register "server" serverPid
+        other@_ -> reregister "server" serverPid
+
+    -- Kill this process if server dies
+    link serverPid
+
+    mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
+
+    pisd <- spawnLocal $ raftThread clusterState raftState
+
+    -- Hack to block
+    x <- receiveWait []
+
+    return ()
 
 
 
