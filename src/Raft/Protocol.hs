@@ -475,34 +475,19 @@ leaderThread c mr u = do
                 r'LastIndex     = r'LogSize
                 r'MatchIndex    = r'MatchIndexMap Map.! n
             in 
-
-            
-                if r'MatchIndex >= r'LogSize
-                    then -- heartbeat
-                        let msg = AppendEntriesMsg {
-                                aeSender     = raftPid c
-                              , aeTerm       = currentTerm r'
-                              , leaderId     = selfNodeId c
-                              , prevLogIndex = r'NextIndex - 1
-                              , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
-                              , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
-                              , leaderCommit = commitIndex r'
-                            }
-                        in (r', Just $ (n, msg):a)
-                    else
-                        let msg = AppendEntriesMsg {
-                                aeSender     = raftPid c
-                              , aeTerm       = currentTerm r'
-                              , leaderId     = selfNodeId c
-                              , prevLogIndex = r'NextIndex - 1
-                              , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
-                              , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
-                              , leaderCommit = commitIndex r'
-                            }
-                            r'' = r' { 
-                                nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
-                            }
-                        in (r'', Just $ (n, msg):a)
+                let msg = AppendEntriesMsg {
+                        aeSender     = raftPid c
+                      , aeTerm       = currentTerm r'
+                      , leaderId     = selfNodeId c
+                      , prevLogIndex = r'NextIndex - 1
+                      , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
+                      , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
+                      , leaderCommit = commitIndex r'
+                    }
+                    r'' = r' { 
+                        nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
+                    }
+                in (r'', Just $ (n, msg):a)
             ) (r, Just []) (peers c)
         | otherwise = return (r, Nothing)
 
