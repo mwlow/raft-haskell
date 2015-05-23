@@ -377,6 +377,8 @@ electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
+    --say "Election started!"
+
     -- Update raftState and create (Maybe RequestVoteMsg)
     msg <- liftIO $ modifyMVarMasked mr $ \r -> do
         if state r == Leader
@@ -502,44 +504,50 @@ raftThread c mr = do
    -- Choose election timeout between 150ms and 300ms
     timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
 
+    -- Update cluster with raftPid
+    selfPid <- getSelfPid
+    let c' = c { raftPid = selfPid }
+
     -- Restart election delay thread
-    kill (delayPid c) "restart"
-    delayPid <- spawnLocal $ delayThread c mr timeout
-    let c' = c { delayPid = delayPid }
+    kill (delayPid c') "restart"
+    delayPid <- spawnLocal $ delayThread c' mr timeout
+    let c'' = c' { delayPid = delayPid }
 
     -- Block for RPC Messages
     msg <- receiveWait
-      [ match recvAppendEntriesMsg
-      , match recvAppendEntriesResponseMsg
-      , match recvRequestVoteMsg
+      [ --match recvAppendEntriesMsg
+      --, match recvAppendEntriesResponseMsg
+      match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
 
     -- Handle RPC Message
     case msg of
-        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c' mr m
-        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c' mr m
-        RpcRequestVoteMsg m -> handleRequestVoteMsg c' mr m
-        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c' mr m
-        other@_ -> return ()
+        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c'' mr m
+        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c'' mr m
+        RpcRequestVoteMsg m -> handleRequestVoteMsg c'' mr m
+        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c'' mr m
+        other@_ -> say "Uncaught message!" >> return ()
 
     -- Update if become leader
     s <- liftIO $ modifyMVarMasked mr $ \r -> do
         case state r of
-            Candidate -> if voteCount r > numNodes c' `div` 2
+            Candidate -> if voteCount r > numNodes c'' `div` 2
                 then return (r {
                     state        = Leader
-                  , leader       = Just $ selfNodeId c'
+                  , leader       = Just $ selfNodeId c''
                   , nextIndexMap = Map.fromList $
-                        zip (nodeIds c') $ repeat $ 1 + IntMap.size (log r)
+                        zip (nodeIds c'') $ repeat $ 1 + IntMap.size (log r)
                 }, True)
                 else return (r, False)
             other@_   -> return (r, False)
 
+    t <- liftIO $ withMVarMasked mr $ \r -> return $ currentTerm r
+
     if s
-        then say "I am leader!"
+        then say $ "I am leader of term: " ++ show t
         else return ()
     -- Loop Forever
-    raftThread c' mr
+    raftThread c'' mr
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
