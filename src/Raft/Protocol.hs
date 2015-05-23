@@ -177,7 +177,7 @@ data ClusterState = ClusterState
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader       :: NodeId                  
+    { leader       :: Maybe NodeId               
     , state        :: ServerRole
     , currentTerm  :: Term
     , votedFor     :: Maybe NodeId
@@ -217,7 +217,7 @@ handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
     send (rvSender msg) (RequestVoteResponseMsg (mainPid c) t g)
   where
-    handleMsg :: ClusterState 
+    handleMsg :: ClusterState
               -> RaftState a 
               -> RequestVoteMsg 
               -> IO (RaftState a, (Term, Bool))
@@ -242,10 +242,28 @@ handleRequestVoteMsg c mr msg = do
 
 -- | Handle Request Vote response from peer
 handleRequestVoteResponseMsg :: ClusterState
-                             -> RaftState a
+                             -> MVar (RaftState a)
                              -> RequestVoteResponseMsg
-                             -> Process (ClusterState, RaftState a)
-handleRequestVoteResponseMsg clusterState nodeState
+                             -> Process ()
+handleRequestVoteResponseMsg c mr msg = do
+    liftIO $ modifyMVarMasked_ mr $ \r -> handleMsg c r msg
+  where
+    handleMsg :: ClusterState 
+              -> RaftState a 
+              -> RequestVoteResponseMsg 
+              -> IO (RaftState a)
+    handleMsg c r (RequestVoteResponseMsg sender term granted)
+        | term > rCurrentTerm = return $ stepDown r term
+        | rState == Candidate && rCurrentTerm == term && granted =
+            return r { voteCount = rVoteCount + 1 }
+        | otherwise = return r
+      where
+        rState         = state r
+        rCurrentTerm   = currentTerm r
+        rVoteCount     = voteCount r
+
+{-
+
     (RequestVoteResponseMsg 
         sender 
         term 
@@ -264,7 +282,7 @@ handleRequestVoteResponseMsg clusterState nodeState
     nState         = state nodeState
     nCurrentTerm   = currentTerm nodeState
     nVoteCount     = voteCount nodeState
-
+-}
 
 -- | Handle Append Entries request from peer
 handleAppendEntriesMsg :: ClusterState
