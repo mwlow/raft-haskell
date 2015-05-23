@@ -330,6 +330,7 @@ handleAppendEntriesResponseMsg c mr msg =
                 else return r {
                     nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
                 }
+        | otherwise = return r
       where
         peer           = processNodeId sender
         rState         = state r
