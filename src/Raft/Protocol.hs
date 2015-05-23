@@ -455,21 +455,21 @@ raftThread c mr = do
 
     return ()
 
-rpcThread :: ClusterState -> MVar (RaftState a) -> Process ()
-rpcThread c mr = return()
 
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do
     selfPid <- getSelfPid
+    selfNid <- getSelfNode
 
      -- Initialize state
     randomGen <- liftIO createSystemRandom
-    let 
+    let
+        placeHolder = localNodeId <$> nodes  
         clusterState = ClusterState{
             backend = backend
-            ,selfNodeId  = selfPid                -- ^ nodeId of current server
-            , nodeIds   = localNodeId <$> nodes                -- ^ List of nodeIds in the topology
-            , peers       = nodeIds \\ [selfNodeId]                -- ^ nodeIds \\ [selfNodeId]
+            , selfNodeId  = selfNid         -- ^ nodeId of current server
+            , nodeIds   =  localNodeId <$> nodes             -- ^ List of nodeIds in the topology
+            , peers       = placeHolder \\ [selfNid]              -- ^ nodeIds \\ [selfNodeId]
             , knownIds    = Map.empty-- ^ Map of known processIds
             , unknownIds  = Map.empty -- ^ Map of unknown processIds
             , mainPid     = selfPid -- ^ ProcessId of the master thread
@@ -483,7 +483,7 @@ initRaft backend nodes = do
             , state        = Follower
             , currentTerm  = 0
             , votedFor     = Nothing
-            , log          = IntMap.empty
+            , log          = IntMap.empty :: IntMap.IntMap (LogEntry String)
             , commitIndex  = 0
             , lastApplied  = 0
 
@@ -493,8 +493,12 @@ initRaft backend nodes = do
             , voteCount    = 0
         }
 
+    mr <- liftIO $ newEmptyMVar
+    liftIO $ putMVar mr raftState
+    --mr <- liftIO $ newEmptyMVar >>= (`putMVar` raftState) >>= return
+
      -- Start process for handling messages and register it
-    serverPid <- spawnLocal (raftLoop clusterState raftState)
+    serverPid <- spawnLocal (raftThread clusterState mr)
     reg <- whereis "server"
     case reg of
         Nothing -> register "server" serverPid
@@ -505,7 +509,6 @@ initRaft backend nodes = do
 
     mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
 
-    pisd <- spawnLocal $ raftThread clusterState raftState
 
     -- Hack to block
     x <- receiveWait []
