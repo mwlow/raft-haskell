@@ -161,6 +161,7 @@ recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 -- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
     { backend     :: Backend                  -- ^ Backend for the topology
+    , numNodes    :: Int
     , selfNodeId  :: NodeId                   -- ^ nodeId of current server
     , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
     , peers       :: [NodeId]                 -- ^ nodeIds \\ [selfNodeId]
@@ -391,6 +392,35 @@ delayThread c mr t = do
     return ()
 
 
+-- | This thread only performs work when the server is the leader.
+leaderThread :: ClusterState -> MVar (RaftState a) -> Int -> Process ()
+leaderThread c mr u = do
+    -- Die when parent does
+    link $ mainPid c
+
+    -- Delay u ns to main update rate
+    liftIO $ threadDelay u
+
+    -- Create AppendEntries
+    msg <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
+
+    case msg of
+        Just _ -> leaderThread c mr u
+        Nothing -> leaderThread c mr u
+  where
+    handleLeader :: ClusterState 
+                 -> RaftState a 
+                 -> IO (RaftState a, Maybe [(NodeId, AppendEntriesMsg a)])
+    handleLeader c r
+        | otherwise = return (r, Just [])
+      where
+        rState         = state r
+        rMatchIndexMap = matchIndexMap r
+        rNextIndexMap  = nextIndexMap r
+        rLog           = log r
+        rLogSize       = IntMap.size rLog
+
+
 -- | Main loop of the program.
 raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
@@ -415,11 +445,26 @@ raftThread c mr = do
     -- Handle RPC Message
     case msg of
         RpcAppendEntriesMsg m -> handleAppendEntriesMsg c mr m
+        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c mr m
         RpcRequestVoteMsg m -> handleRequestVoteMsg c mr m
+        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c mr m
         other@_ -> return ()
 
+    -- Update if become leader
+    liftIO $ modifyMVarMasked_ mr $ \r -> do
+        case state r of
+            Candidate -> if voteCount r > numNodes c `div` 2
+                then return r {
+                    state        = Leader
+                  , leader       = Just $ selfNodeId c
+                  , nextIndexMap = Map.fromList $
+                        zip (nodeIds c) $ repeat $ 1 + IntMap.size (log r)
+                }
+                else return r
+            other@_   -> return r
 
-    return ()
+    -- Loop Forever
+    raftThread c mr
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
