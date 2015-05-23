@@ -395,7 +395,8 @@ delayThread c mr t = do
 -- | This thread only performs work when the server is the leader.
 -- TODO: How does this thread affect election timeout?
 -- TODO: How does leader deal with election timeout?
-leaderThread :: ClusterState -> MVar (RaftState a) -> Int -> Process ()
+leaderThread :: (Serializable a) 
+             => ClusterState -> MVar (RaftState a) -> Int -> Process ()
 leaderThread c mr u = do
     -- Die when parent does
     link $ mainPid c
@@ -404,11 +405,17 @@ leaderThread c mr u = do
     liftIO $ threadDelay u
 
     -- Create AppendEntries
-    msgs <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
+    msgsM <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
 
-    case msgs of
-        Nothing -> leaderThread c mr u
-        Just m -> leaderThread c mr u
+    -- Send them if they were created
+    case msgsM of
+        Nothing   -> return ()
+        Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
+
+    -- Loop forever
+    leaderThread c mr u
+
+    -- Advance commit index and state machine??
   where
     handleLeader :: ClusterState 
                  -> RaftState a 
