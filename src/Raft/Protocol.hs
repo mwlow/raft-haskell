@@ -283,9 +283,9 @@ handleAppendEntriesMsg c mr msg = do
         | prevLogIndex == 0 || 
             (prevLogIndex <= rLogSize && 
                 logTerm (log r) prevLogIndex == prevLogIndex) = do
-            let rLog0 = appendLog rLog entries prevLogIndex
-                index = IntMap.size rLog0
-                r'    = r { log = rLog0, commitIndex = min leaderCommit index }
+            let rLog' = appendLog rLog entries prevLogIndex
+                index = IntMap.size rLog'
+                r'    = r { log = rLog', commitIndex = min leaderCommit index }
             return (r', (rCurrentTerm, True, index))
         | otherwise = return (r, (rCurrentTerm, False, 0))
       where
@@ -407,8 +407,8 @@ leaderThread c mr u = do
     msgs <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
 
     case msgs of
-        Just _ -> leaderThread c mr u
         Nothing -> leaderThread c mr u
+        Just m -> leaderThread c mr u
   where
     handleLeader :: ClusterState 
                  -> RaftState a 
@@ -419,23 +419,24 @@ leaderThread c mr u = do
                 r'NextIndexMap  = nextIndexMap r'
                 r'Log           = log r'
                 r'LogSize       = IntMap.size r'Log
-                lastIndex       = 0 --TODO
+                r'NextIndex     = r'NextIndexMap Map.! n
+                r'LastIndex     = r'LogSize
+                r'MatchIndex    = r'MatchIndexMap Map.! n
             in 
-                if r'MatchIndexMap Map.! n >= r'LogSize
+                if r'MatchIndex >= r'LogSize
                     then (r', Just a)
                     else
-                        let r'' = r' { 
-                                nextIndexMap = 
-                                    Map.insert n lastIndex r'NextIndexMap
-                            }
-                            msg = AppendEntriesMsg {
+                        let msg = AppendEntriesMsg {
                                 aeSender     = raftPid c
-                              , aeTerm       = currentTerm r''
+                              , aeTerm       = currentTerm r'
                               , leaderId     = selfNodeId c
-                              , prevLogIndex = lastIndex - 1
-                              , prevLogTerm  = logTerm (log r'') (lastIndex - 1)
-                              , entries      = IntMap.empty
-                              , leaderCommit = commitIndex r''
+                              , prevLogIndex = r'NextIndex - 1
+                              , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
+                              , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
+                              , leaderCommit = commitIndex r'
+                            }
+                            r'' = r' { 
+                                nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
                             }
                         in (r'', Just $ (n, msg):a)
             ) (r, Just []) (peers c)
