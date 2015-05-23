@@ -475,8 +475,20 @@ leaderThread c mr u = do
                 r'LastIndex     = r'LogSize
                 r'MatchIndex    = r'MatchIndexMap Map.! n
             in 
+
+            
                 if r'MatchIndex >= r'LogSize
-                    then (r', Just a)
+                    then -- heartbeat
+                        let msg = AppendEntriesMsg {
+                                aeSender     = raftPid c
+                              , aeTerm       = currentTerm r'
+                              , leaderId     = selfNodeId c
+                              , prevLogIndex = r'NextIndex - 1
+                              , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
+                              , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
+                              , leaderCommit = commitIndex r'
+                            }
+                        in (r', Just $ (n, msg):a)
                     else
                         let msg = AppendEntriesMsg {
                                 aeSender     = raftPid c
@@ -515,9 +527,9 @@ raftThread c mr = do
 
     -- Block for RPC Messages
     msg <- receiveWait
-      [ --match recvAppendEntriesMsg
-      --, match recvAppendEntriesResponseMsg
-      match recvRequestVoteMsg
+      [ match recvAppendEntriesMsg
+      , match recvAppendEntriesResponseMsg
+      , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
 
     -- Handle RPC Message
