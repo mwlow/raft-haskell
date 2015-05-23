@@ -323,13 +323,40 @@ handleAppendEntriesResponseMsg c mr msg =
         (AppendEntriesResponseMsg sender term matchIndex success) = 
         return (r) -- placeholder
 
+{-}
+                               -> Process (ClusterState, RaftState a)
+handleAppendEntriesResponseMsg clusterState raftState
+    (AppendEntriesResponseMsg
+        sender
+        seqno
+        term
+        matchIndex
+        success) 
+    |  term > nCurrentTerm =
+        return (clusterState, stepDown raftState term)
+    | otherwise =
+        case nState of
+            Candidate ->
+                if nCurrentTerm == term && success
+                    then return (clusterState 
+                               , raftState { matchIndexMap = 
+                                                Map.insert (processNodeId sender) matchIndex (matchIndexMap raftState),
+                                             nextIndexMap = 
+                                                Map.insert (processNodeId sender) (matchIndex + 1) (nextIndexMap raftState)})
+                    else return (clusterState, 
+                                raftState{
+                                nextIndexMap = Map.insert (processNodeId sender) (max 1 (indexLookup (processNodeId sender) (nextIndexMap raftState))) (nextIndexMap raftState)})
+            other@_   -> return (clusterState, raftState)
+    where 
+        nState         = state raftState
+        nCurrentTerm   = currentTerm raftState
 
-
-
-
-
-
-
+        indexLookup :: NodeId -> Map.Map NodeId Index -> Int  
+        indexLookup pid map =   
+            case Map.lookup pid map of   
+                Nothing -> 0
+                Just value -> value - 1
+-}
 
 
 -- | This thread starts a new election.
