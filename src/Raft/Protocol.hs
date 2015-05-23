@@ -243,7 +243,7 @@ handleRequestVoteResponseMsg :: ClusterState
                              -> MVar (RaftState a)
                              -> RequestVoteResponseMsg
                              -> Process ()
-handleRequestVoteResponseMsg c mr msg = do
+handleRequestVoteResponseMsg c mr msg =
     liftIO $ modifyMVarMasked_ mr $ \r -> handleMsg c r msg
   where
     handleMsg :: ClusterState 
@@ -304,27 +304,31 @@ handleAppendEntriesMsg c mr msg = do
             ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
             -- TODO This is currently O(n)
             initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
-            
+
 
 -- | Handle Append Entries response from peer
 -- TRY THIS OUT GABRIEL
 handleAppendEntriesResponseMsg :: ClusterState
-                               -> RaftState a
+                               -> MVar (RaftState a)
                                -> AppendEntriesResponseMsg
-                               -> Process (ClusterState, RaftState a)
-handleAppendEntriesResponseMsg clusterState nodeState
-    (AppendEntriesResponseMsg
-        sender
-        term
-        matchIndex
-        success) = 
-    return (clusterState, nodeState) -- placeholder
+                               -> Process ()
+handleAppendEntriesResponseMsg c mr msg =
+    liftIO $ modifyMVarMasked_ mr $ \r -> handleMsg c r msg
+  where
+    handleMsg :: ClusterState
+              -> RaftState a 
+              -> AppendEntriesResponseMsg
+              -> IO (RaftState a)
+    handleMsg c r 
+        (AppendEntriesResponseMsg sender term matchIndex success) = 
+        return (r) -- placeholder
 
 
--- 
--- election thread
--- electionTimeout Thread
--- raftLoop: handles receiving rpcs
+
+
+
+
+
 
 
 
