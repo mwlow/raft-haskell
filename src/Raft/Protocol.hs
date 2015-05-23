@@ -1,4 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 
 --Notes: use txt file as state-machine? Therefore we can write a second program
@@ -69,7 +68,6 @@ instance (Binary a) => Binary (LogEntry a) where
 -- | Data structure for appendEntriesRPC. Is serializable.
 data AppendEntriesMsg a = AppendEntriesMsg 
     { aeSender       :: ProcessId -- ^ Sender's process id
-    , aeSeqno        :: Int       -- ^ Sequence number, for matching replies
     , aeTerm         :: Term      -- ^ Leader's term
     , leaderId       :: NodeId    -- ^ Leader's Id
     , prevLogIndex   :: Index     -- ^ Log entry index right before new ones
@@ -79,29 +77,25 @@ data AppendEntriesMsg a = AppendEntriesMsg
     } deriving (Show, Eq, Typeable)
 
 instance (Binary a) => Binary (AppendEntriesMsg a) where
-    put (AppendEntriesMsg a b c d e f g i) =
-        put a >> put b >> put c >> put d >> put e >> put f >> put g >> put i
-    get = AppendEntriesMsg <$> get <*> get <*> get <*> get <*> get <*> get
-                           <*> get <*> get
+    put (AppendEntriesMsg a b c d e f g) =
+        put a >> put b >> put c >> put d >> put e >> put f >> put g
+    get = AppendEntriesMsg <$> get <*> get <*> get <*> get <*> get <*> get <*> get
 
 -- | Data structure for the response to appendEntriesRPC. Is serializable.
 data AppendEntriesResponseMsg = AppendEntriesResponseMsg 
     { aerSender     :: ProcessId  -- ^ Sender's process id
-    , aerSeqno      :: Int        -- ^ Sequence number, for matching replies
     , aerTerm       :: Term       -- ^ Current term to update leader
     , aerMatchIndex :: Index      -- ^ Index of highest log entry replicated
     , success       :: Bool       -- ^ Did follower contain a matching entry?
     } deriving (Show, Eq, Typeable)
 
 instance Binary AppendEntriesResponseMsg where
-    put (AppendEntriesResponseMsg a b c d e) = 
-        put a >> put b >> put c >> put d >> put e
-    get = AppendEntriesResponseMsg <$> get <*> get <*> get <*> get <*> get
+    put (AppendEntriesResponseMsg a b c d) = put a >> put b >> put c >> put d
+    get = AppendEntriesResponseMsg <$> get <*> get <*> get <*> get
 
 -- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
     { rvSender      :: ProcessId   -- ^ Sender's process id
-    , rvSeqno       :: Int         -- ^ Sequence number, for matching replies
     , rvTerm        :: Term        -- ^ Candidate's term
     , candidateId   :: NodeId      -- ^ Candidate requesting vote
     , lastLogIndex  :: Index       -- ^ Index of candidate's last log entry
@@ -109,22 +103,21 @@ data RequestVoteMsg = RequestVoteMsg
     } deriving (Show, Eq, Typeable)
 
 instance Binary RequestVoteMsg where
-    put (RequestVoteMsg a b c d e f) = 
-        put a >> put b >> put c >> put d >> put e >> put f
-    get = RequestVoteMsg <$> get <*> get <*> get <*> get <*> get <*> get
+    put (RequestVoteMsg a b c d e) = 
+        put a >> put b >> put c >> put d >> put e
+    get = RequestVoteMsg <$> get <*> get <*> get <*> get <*> get
 
 -- | Data structure for the response to requestVoteRPC. Is serializable.
 data RequestVoteResponseMsg = RequestVoteResponseMsg
     { rvrSender     :: ProcessId  -- ^ Sender's process id
-    , rvrSeqno      :: Int        -- ^ Sequence number, for matching replies
     , rvrTerm       :: Term       -- ^ Current term to update leader
     , voteGranted   :: Bool       -- ^ Did candidate receive vote?
     } deriving (Show, Eq, Typeable)
 
 instance Binary RequestVoteResponseMsg where
-    put (RequestVoteResponseMsg a b c d) =
-        put a >> put b >> put c >> put d
-    get = RequestVoteResponseMsg <$> get <*> get <*> get <*> get
+    put (RequestVoteResponseMsg a b c) =
+        put a >> put b >> put c
+    get = RequestVoteResponseMsg <$> get <*> get <*> get
 
 -- | Hack to allow us to process arbitrary messages from the mailbox
 data RpcMessage a
@@ -214,43 +207,37 @@ logTerm log index
     | index > IntMap.size log = 0
     | otherwise = termReceived (log IntMap.! index)
 
+
 -- | Handle Request Vote request from peer
 handleRequestVoteMsg :: ClusterState 
                      -> MVar (RaftState a) 
                      -> RequestVoteMsg
-                     -> Process (ClusterState, RaftState a)
-handleRequestVoteMsg clusterState nodeState
-    (RequestVoteMsg 
-        sender 
-        seqno 
-        term 
-        candidateId 
-        lastLogIndex
-        lastLogTerm)
-    | term > nCurrentTerm =
-        reply term False >> return (clusterState, stepDown nodeState term)
-    | term < nCurrentTerm =
-        reply nCurrentTerm False >> return (clusterState, nodeState)
-    | nVotedFor `elem` [Nothing, Just candidateId] && isUpToDate = do
-        let n0 = nodeState { votedFor = Just candidateId }
-        reply term True >> return (clusterState, n0)
-    | otherwise =
-        reply nCurrentTerm False >> return (clusterState, nodeState)
+                     -> Process ()
+handleRequestVoteMsg c mr msg = do
+    (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    send (rvSender msg) (RequestVoteResponseMsg (mainPid c) t g)
   where
-    nLog           = log nodeState
-    nLogSize       = IntMap.size nLog
-    nVotedFor      = votedFor nodeState
-    nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = logTerm (log nodeState) nLogSize
+    handleMsg :: ClusterState 
+              -> RaftState a 
+              -> RequestVoteMsg 
+              -> IO (RaftState a, (Term, Bool))
+    handleMsg c r
+        (RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
+        | term > rCurrentTerm = return (stepDown r term, (term, False))
+        | term < rCurrentTerm = return (r, (rCurrentTerm, False))
+        | rVotedFor `elem` [Nothing, Just candidateId] && isUpToDate =
+            return (r { votedFor = Just candidateId }, (term, True))
+        | otherwise = return (r, (rCurrentTerm, False))
+      where
+        rLog           = log r
+        rLogSize       = IntMap.size rLog
+        rVotedFor      = votedFor r
+        rCurrentTerm   = currentTerm r
+        rLastLogTerm   = logTerm (log r) rLogSize
 
-    isUpToDate :: Bool
-    isUpToDate = lastLogTerm > nLastLogTerm || 
-        (lastLogTerm == nLastLogTerm && lastLogIndex >= nLogSize)
-
-    reply :: Term -> Bool -> Process ()
-    reply term granted = do
-        self <- getSelfPid
-        send sender (RequestVoteResponseMsg self seqno term granted)
+        isUpToDate :: Bool
+        isUpToDate = lastLogTerm > rLastLogTerm || 
+            (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)
 
 
 -- | Handle Request Vote response from peer
@@ -261,7 +248,6 @@ handleRequestVoteResponseMsg :: ClusterState
 handleRequestVoteResponseMsg clusterState nodeState
     (RequestVoteResponseMsg 
         sender 
-        seqno 
         term 
         granted)
     | term > nCurrentTerm =
@@ -288,7 +274,6 @@ handleAppendEntriesMsg :: ClusterState
 handleAppendEntriesMsg c mr
     (AppendEntriesMsg
         sender
-        seqno
         term
         leaderId
         prevLogIndex
@@ -360,7 +345,6 @@ handleAppendEntriesResponseMsg :: ClusterState
 handleAppendEntriesResponseMsg clusterState raftState
     (AppendEntriesResponseMsg
         sender
-        seqno
         term
         matchIndex
         success) 
@@ -410,7 +394,6 @@ electionThread c mr = do
                            }
                     msg = RequestVoteMsg 
                            { rvSender     = raftPid c 
-                           , rvSeqno      = 0
                            , rvTerm       = currentTerm r0
                            , candidateId  = selfNodeId c
                            , lastLogIndex = IntMap.size $ log r
