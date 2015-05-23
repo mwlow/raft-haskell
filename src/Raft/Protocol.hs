@@ -187,7 +187,7 @@ newCluster backend nodes = do
       , nodeIds    = localNodeId <$> nodes 
       , peers      = (localNodeId <$> nodes) \\ [processNodeId selfPid]
       , mainPid    = selfPid
-      , raftPid    = selfPid
+      , raftPid    = nullProcessId (processNodeId selfPid)
       , delayPid   = nullProcessId (processNodeId selfPid)
       , randomGen  = randomGen
     }
@@ -246,6 +246,7 @@ handleRequestVoteMsg :: ClusterState
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    say $ "requestvote, granted: " ++ show g 
     send (rvSender msg) (RequestVoteResponseMsg (raftPid c) t g)
   where
     handleMsg :: ClusterState
@@ -253,8 +254,8 @@ handleRequestVoteMsg c mr msg = do
               -> RequestVoteMsg 
               -> IO (RaftState a, (Term, Bool))
     handleMsg c r
-        (RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
-        | term > rCurrentTerm = return (stepDown r term, (term, False))
+        msg@(RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | term < rCurrentTerm = return (r, (rCurrentTerm, False))
         | rVotedFor `elem` [Nothing, Just candidateId] && 
             (lastLogTerm > rLastLogTerm || 
@@ -377,7 +378,7 @@ electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
-    --say "Election started!"
+    say "Election started!"
 
     -- Update raftState and create (Maybe RequestVoteMsg)
     msg <- liftIO $ modifyMVarMasked mr $ \r -> do
@@ -523,7 +524,7 @@ raftThread c mr = do
         RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c'' mr m
         RpcRequestVoteMsg m -> handleRequestVoteMsg c'' mr m
         RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c'' mr m
-        other@_ -> say "Uncaught message!" >> return ()
+        other@_ -> return ()
 
     -- Update if become leader
     s <- liftIO $ modifyMVarMasked mr $ \r -> do
