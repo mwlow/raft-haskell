@@ -168,15 +168,15 @@ recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 -- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
     { backend     :: Backend                  -- ^ Backend for the topology
+    , selfNodeId  :: NodeId                   -- ^ nodeId of current server
     , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
-    , selfNodeId  :: NodeId                   -- ^ nodeId of current server 
+    , peers       :: [NodeId]                 -- ^ nodeIds \\ [selfNodeId]
     , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
     , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
 
     , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
     , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
     , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
-    , electionPid :: ProcessId     -- ^ ProcessId of the election starter thread
     , randomGen   :: GenIO         -- ^ Random generator for random events
     }
 
@@ -192,8 +192,8 @@ data RaftState a = RaftState
     , commitIndex  :: Index
     , lastApplied  :: Index
 
-    , nextIndex    :: Map.Map NodeId Index
-    , matchIndex   :: Map.Map NodeId Index
+    , nextIndexMap    :: Map.Map NodeId Index
+    , matchIndexMap   :: Map.Map NodeId Index
 
     , voteCount    :: Int
     }
@@ -379,26 +379,34 @@ electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
-    liftIO $ modifyMVarMasked_ mr $ \r -> do
+    -- Update raftState and create (Maybe RequestVoteMsg)
+    msg <- liftIO $ modifyMVarMasked mr $ \r -> do
         if state r == Leader
-            then return r
+            then return (r, Nothing)
             else 
-                let r0 = r { state       = Candidate 
-                           , votedFor    = Just $ selfNodeId c
-                           , currentTerm = 1 + currentTerm r
-                           , voteCount   = 1
-                           , matchIndex  = Map.fromList $ zip (nodeIds c) [0, 0..]
-                           , nextIndex   = Map.fromList $ zip (nodeIds c) [1, 1..]
+                let r0 = r { state          = Candidate 
+                           , votedFor       = Just $ selfNodeId c
+                           , currentTerm    = 1 + currentTerm r
+                           , voteCount      = 1
+                           , matchIndexMap  = Map.fromList $ zip (nodeIds c) [0, 0..]
+                           , nextIndexMap   = Map.fromList $ zip (nodeIds c) [1, 1..]
                            }
-                in return r0
+                    msg = RequestVoteMsg 
+                           { rvSender     = raftPid c 
+                           , rvSeqno      = 0
+                           , rvTerm       = currentTerm r0
+                           , candidateId  = selfNodeId c
+                           , lastLogIndex = IntMap.size $ log r
+                           , lastLogTerm  = logTerm (log r) (IntMap.size $ log r)
+                           }
+                in return (r0, Just msg)
+    
+    case msg of
+        -- New election started, send RequestVoteMsg to all peers
+        Just m -> mapM_ (\x -> nsendRemote x "server" m) $ peers c
+        -- We were already leader, do nothing
+        Nothing -> return ()
 
-                RequestVoteMsg { rvSender     = raftPid c 
-                               , rvSeqno      = 0
-                               , rvTerm       = currentTerm r0
-                               , candidateId  = selfNodeId c
-                               , lastLogIndex = IntMap.size $ log r
-                               , lastLogTerm  = logTerm (log r) (IntMap.size $ log r)
-                               }
     return ()
 
 
@@ -412,7 +420,7 @@ delayThread c mr t = do
     liftIO $ threadDelay t
 
     -- Spawn thread that starts election
-    delayPid <- spawnLocal $ electionThread c mr
+    spawnLocal $ electionThread c mr
 
     return ()
 
