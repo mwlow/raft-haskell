@@ -523,27 +523,50 @@ raftThread c mr = do
         other@_ -> return ()
 
     -- Update if become leader
-    liftIO $ modifyMVarMasked_ mr $ \r -> do
+    s <- liftIO $ modifyMVarMasked mr $ \r -> do
         case state r of
             Candidate -> if voteCount r > numNodes c' `div` 2
-                then return r {
+                then return (r {
                     state        = Leader
                   , leader       = Just $ selfNodeId c'
                   , nextIndexMap = Map.fromList $
                         zip (nodeIds c') $ repeat $ 1 + IntMap.size (log r)
-                }
-                else return r
-            other@_   -> return r
+                }, True)
+                else return (r, False)
+            other@_   -> return (r, False)
 
+    if s
+        then say "I am leader!"
+        else return ()
     -- Loop Forever
     raftThread c' mr
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
-initRaft backend nodes = return ()
+initRaft backend nodes = do
 
+    -- Initialize state
+    c <- newCluster backend nodes
+    mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
 
+    -- Start process for handling messages and register it
+    raftPid <- spawnLocal (raftThread c mr)
+    reg <- whereis "server"
+    case reg of
+        Nothing -> register "server" raftPid
+        _       -> reregister "server" raftPid
 
+    -- Start leader thread
+    leaderPid <- spawnLocal (leaderThread c mr 75000)
+
+    -- Kill this process if raftThread dies
+    link raftPid
+    link leaderPid
+
+    -- Hack to block
+    x <- receiveWait []
+
+    return ()
 
 
 {-
