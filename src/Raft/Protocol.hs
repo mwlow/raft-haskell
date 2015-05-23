@@ -285,8 +285,8 @@ handleAppendEntriesMsg c mr msg = do
                 logTerm (log r) prevLogIndex == prevLogIndex) = do
             let rLog0 = appendLog rLog entries prevLogIndex
                 index = IntMap.size rLog0
-                r0    = r { log = rLog0, commitIndex = min leaderCommit index }
-            return (r0, (rCurrentTerm, True, index))
+                r'    = r { log = rLog0, commitIndex = min leaderCommit index }
+            return (r', (rCurrentTerm, True, index))
         | otherwise = return (r, (rCurrentTerm, False, 0))
       where
         rLog           = log r
@@ -352,7 +352,7 @@ electionThread c mr = do
         if state r == Leader
             then return (r, Nothing)
             else 
-                let r0 = r { state          = Candidate 
+                let r' = r { state          = Candidate 
                            , votedFor       = Just $ selfNodeId c
                            , currentTerm    = 1 + currentTerm r
                            , voteCount      = 1
@@ -361,12 +361,12 @@ electionThread c mr = do
                            }
                     msg = RequestVoteMsg 
                            { rvSender     = raftPid c 
-                           , rvTerm       = currentTerm r0
+                           , rvTerm       = currentTerm r'
                            , candidateId  = selfNodeId c
                            , lastLogIndex = IntMap.size $ log r
                            , lastLogTerm  = logTerm (log r) (IntMap.size $ log r)
                            }
-                in return (r0, Just msg)
+                in return (r', Just msg)
     
     case msg of
         -- New election started, send RequestVoteMsg to all peers
@@ -393,6 +393,8 @@ delayThread c mr t = do
 
 
 -- | This thread only performs work when the server is the leader.
+-- TODO: How does this thread affect election timeout?
+-- TODO: How does leader deal with election timeout?
 leaderThread :: ClusterState -> MVar (RaftState a) -> Int -> Process ()
 leaderThread c mr u = do
     -- Die when parent does
@@ -402,9 +404,9 @@ leaderThread c mr u = do
     liftIO $ threadDelay u
 
     -- Create AppendEntries
-    msg <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
+    msgs <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
 
-    case msg of
+    case msgs of
         Just _ -> leaderThread c mr u
         Nothing -> leaderThread c mr u
   where
@@ -412,13 +414,32 @@ leaderThread c mr u = do
                  -> RaftState a 
                  -> IO (RaftState a, Maybe [(NodeId, AppendEntriesMsg a)])
     handleLeader c r
-        | otherwise = return (r, Just [])
-      where
-        rState         = state r
-        rMatchIndexMap = matchIndexMap r
-        rNextIndexMap  = nextIndexMap r
-        rLog           = log r
-        rLogSize       = IntMap.size rLog
+        | state r == Leader = return $ foldr (\n (r', Just a) ->
+            let r'MatchIndexMap = matchIndexMap r'
+                r'NextIndexMap  = nextIndexMap r'
+                r'Log           = log r'
+                r'LogSize       = IntMap.size r'Log
+                lastIndex       = 0 --TODO
+            in 
+                if r'MatchIndexMap Map.! n >= r'LogSize
+                    then (r', Just a)
+                    else
+                        let r'' = r' { 
+                                nextIndexMap = 
+                                    Map.insert n lastIndex r'NextIndexMap
+                            }
+                            msg = AppendEntriesMsg {
+                                aeSender     = raftPid c
+                              , aeTerm       = currentTerm r''
+                              , leaderId     = selfNodeId c
+                              , prevLogIndex = lastIndex - 1
+                              , prevLogTerm  = logTerm (log r'') (lastIndex - 1)
+                              , entries      = IntMap.empty
+                              , leaderCommit = commitIndex r''
+                            }
+                        in (r'', Just $ (n, msg):a)
+            ) (r, Just []) (peers c)
+        | otherwise = return (r, Nothing)
 
 
 -- | Main loop of the program.
@@ -433,7 +454,7 @@ raftThread c mr = do
     -- Restart election delay thread
     kill (delayPid c) "restart"
     delayPid <- spawnLocal $ delayThread c mr timeout
-    let c0 = c { delayPid = delayPid }
+    let c' = c { delayPid = delayPid }
 
     -- Block for RPC Messages
     msg <- receiveWait
@@ -444,27 +465,27 @@ raftThread c mr = do
 
     -- Handle RPC Message
     case msg of
-        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c mr m
-        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c mr m
-        RpcRequestVoteMsg m -> handleRequestVoteMsg c mr m
-        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c mr m
+        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c' mr m
+        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c' mr m
+        RpcRequestVoteMsg m -> handleRequestVoteMsg c' mr m
+        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c' mr m
         other@_ -> return ()
 
     -- Update if become leader
     liftIO $ modifyMVarMasked_ mr $ \r -> do
         case state r of
-            Candidate -> if voteCount r > numNodes c `div` 2
+            Candidate -> if voteCount r > numNodes c' `div` 2
                 then return r {
                     state        = Leader
-                  , leader       = Just $ selfNodeId c
+                  , leader       = Just $ selfNodeId c'
                   , nextIndexMap = Map.fromList $
-                        zip (nodeIds c) $ repeat $ 1 + IntMap.size (log r)
+                        zip (nodeIds c') $ repeat $ 1 + IntMap.size (log r)
                 }
                 else return r
             other@_   -> return r
 
     -- Loop Forever
-    raftThread c mr
+    raftThread c' mr
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
