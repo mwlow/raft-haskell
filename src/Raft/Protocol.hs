@@ -343,13 +343,15 @@ handleAppendEntriesMsg c mr msg = do
         appendLog dstLog srcLog prevLogIndex
             | IntMap.null srcLog = dstLog
             | logTerm dstLog index /= termReceived headSrcLog = 
-                appendLog (IntMap.insert index headSrcLog dstLog) tailSrcLog index
+                appendLog (IntMap.insert index headSrcLog initDstLog) tailSrcLog index
             | otherwise = appendLog dstLog tailSrcLog index
           where
             index = prevLogIndex + 1
             ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
-            -- TODO This is currently O(n)
-            initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
+            initDstLog
+                | prevLogIndex < IntMap.size dstLog = 
+                    IntMap.filterWithKey (\k _ -> k <= prevLogIndex) dstLog
+                | otherwise = dstLog
 
 
 -- | Handle Append Entries response from peer.
@@ -433,7 +435,7 @@ applyLog c mr = do
     -- Loop until finish applying all
     if finished
         then return ()
-        else say "Applied" >> applyLog c mr
+        else applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -519,11 +521,6 @@ leaderThread c mr u = do
         if state r == Leader && not (null ns)
             then return r { commitIndex = head ns }
             else return r
-
-    e <- liftIO $ withMVarMasked mr $ \r -> return r
-    if state e == Leader
-        then say $ show (commitIndex e) ++ " " ++ show (IntMap.size $ log e)
-        else return ()
 
     -- Loop forever
     leaderThread c mr u

@@ -33,9 +33,9 @@ commandTests nodes randomGen = do
     
     let id = localNodeId $ nodes !! index
     say $ show id
-    nsendRemote id "client" (Command "test")
+    nsendRemote id "client" (Command (show index))
 
-    liftIO $ threadDelay 2000000
+    liftIO $ threadDelay 1000000
     commandTests nodes randomGen
 
 
