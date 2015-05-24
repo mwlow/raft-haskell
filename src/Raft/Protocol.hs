@@ -129,6 +129,7 @@ data RpcMessage a
     | RpcAppendEntriesResponseMsg AppendEntriesResponseMsg
     | RpcRequestVoteMsg RequestVoteMsg
     | RpcRequestVoteResponseMsg RequestVoteResponseMsg
+    | RpcCommandMsg (Command a)
 
 -- | These wrapping functions return the message in an RPCMsg type.
 recvSay :: String -> Process (RpcMessage a)
@@ -156,6 +157,9 @@ recvRequestVoteMsg a = return $ RpcRequestVoteMsg a
 
 recvRequestVoteResponseMsg :: RequestVoteResponseMsg -> Process (RpcMessage a)
 recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
+
+recvCommandMsg :: Command a -> Process (RpcMessage a)
+recvCommandMsg a = return $ RpcCommandMsg a
 
 
 -- | This is the process's local view of the entire cluster. Information
@@ -372,6 +376,35 @@ handleAppendEntriesResponseMsg c mr msg =
         rNextIndex     = rNextIndexMap Map.! peer
 
 
+handleCommandMsg :: Serializable a
+                 => ClusterState
+                 -> MVar (RaftState a)
+                 -> Command a
+                 -> Process ()
+handleCommandMsg c mr msg = do
+    (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    case leader of
+        Nothing -> return ()
+        Just l  -> if forwardMsg
+            then nsendRemote l "client" msg >> return ()
+            else return ()
+  where
+    handleMsg :: ClusterState 
+              -> RaftState a 
+              -> Command a 
+              -> IO (RaftState a, (Bool, Maybe NodeId))
+    handleMsg c r msg
+        | state r /= Leader = return (r, (True, leader r))
+        | otherwise = do
+            let key = 1 + fst (IntMap.findMax (log r))
+                entry = LogEntry {
+                  termReceived = currentTerm r
+                , committed    = False
+                , command      = msg
+                }
+            return ( r { log = IntMap.insert key entry (log r) }, (False, leader r))
+
+
 -- | This thread starts a new election.
 electionThread :: ClusterState -> MVar (RaftState a) -> Process ()
 electionThread c mr = do
@@ -493,6 +526,21 @@ leaderThread c mr u = do
         | otherwise = return (r, Nothing)
 
 
+-- | This thread handles commands from clients and forwards them
+-- to the leader.
+clientThread :: Serializable a => ClusterState -> MVar (RaftState a) -> Process ()
+clientThread c mr = do 
+    -- Die when parent does
+    link $ mainPid c
+   
+    (RpcCommandMsg m) <- receiveWait [ match recvCommandMsg ]
+    
+    handleCommandMsg c mr m
+
+    -- loop forever
+    clientThread c mr
+
+
 -- | Main loop of the program.
 raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
@@ -517,6 +565,8 @@ raftThread c mr = do
       , match recvAppendEntriesResponseMsg
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
+
+    say "msg received"
 
     -- Handle RPC Message
     case msg of
