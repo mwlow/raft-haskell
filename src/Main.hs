@@ -37,7 +37,6 @@ commandTests nodes = do
     nsendRemote id "client" (Command "test")
 
 
-
 -- | Handle Control C.
 cntrlc :: ThreadId -> [LocalNode] -> IO ()
 cntrlc tid nodes = do
