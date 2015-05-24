@@ -10,6 +10,7 @@
 -- i.e. voteserver
 module Raft.Protocol 
 ( initRaft
+, Command(..)
 )
 where
 
@@ -322,9 +323,17 @@ handleAppendEntriesMsg c mr msg = do
                 logTerm (log r) prevLogIndex == prevLogIndex) = do
             let rLog' = appendLog rLog entries prevLogIndex
                 index = IntMap.size rLog'
-                r'    = r { log = rLog', commitIndex = min leaderCommit index }
+                r'    = r { 
+                            log         = rLog'
+                          , commitIndex = min leaderCommit index
+                          , leader      = Just $ processNodeId sender
+                          , state       = Follower
+                }
             return (r', (rCurrentTerm, True, index))
-        | otherwise = return (r, (rCurrentTerm, False, 0))
+        | otherwise = return (r { 
+                        leader = Just $ processNodeId sender
+                      , state  = Follower
+                      } , (rCurrentTerm, False, 0))
       where
         rLog           = log r
         rLogSize       = IntMap.size rLog
@@ -386,6 +395,7 @@ handleCommandMsg :: Serializable a
                  -> Process ()
 handleCommandMsg c mr msg = do
     (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    say $ show forwardMsg ++ " " ++ show leader
     case leader of
         Nothing -> return ()
         Just l  -> if forwardMsg
@@ -425,7 +435,7 @@ applyLog c mr = do
     -- Loop until finish applying all
     if finished
         then return ()
-        else applyLog c mr
+        else say "applied" >> applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -555,7 +565,7 @@ clientThread c mr = do
     link $ mainPid c
    
     (RpcCommandMsg m) <- receiveWait [ match recvCommandMsg ]
-    
+    say $ "Received something"
     handleCommandMsg c mr m
 
     -- loop forever
