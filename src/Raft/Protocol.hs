@@ -58,7 +58,7 @@ instance (Binary a) => Binary (Command a) where
 -- | An entry in a log, clearly. Also serializable.
 data LogEntry a = LogEntry 
     { termReceived   :: Term
-    , committed      :: Bool
+    , applied        :: Bool
     , command        :: Command a
     } deriving (Show, Read, Eq, Typeable)
 
@@ -179,6 +179,7 @@ data ClusterState = ClusterState
     , randomGen   :: GenIO         -- ^ Random generator for random events
     }
 
+-- | Creates a new cluster.
 newCluster :: Backend -> [LocalNode] -> Process (ClusterState)
 newCluster backend nodes = do 
     selfPid   <- getSelfPid
@@ -213,6 +214,7 @@ data RaftState a = RaftState
     , voteCount       :: Int
     }
 
+-- | Creates a new RaftState.
 newRaftState :: [LocalNode] -> RaftState a
 newRaftState nodes = RaftState {
         leader        = Nothing
@@ -342,7 +344,7 @@ handleAppendEntriesMsg c mr msg = do
             initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
 
 
--- | Handle Append Entries response from peer
+-- | Handle Append Entries response from peer.
 handleAppendEntriesResponseMsg :: ClusterState
                                -> MVar (RaftState a)
                                -> AppendEntriesResponseMsg
@@ -375,7 +377,8 @@ handleAppendEntriesResponseMsg c mr msg =
         rNextIndexMap  = nextIndexMap r
         rNextIndex     = rNextIndexMap Map.! peer
 
-
+-- | Handle command message from a client. If leader, write to log. Else
+-- forward to leader. 
 handleCommandMsg :: Serializable a
                  => ClusterState
                  -> MVar (RaftState a)
@@ -399,10 +402,30 @@ handleCommandMsg c mr msg = do
             let key = 1 + fst (IntMap.findMax (log r))
                 entry = LogEntry {
                   termReceived = currentTerm r
-                , committed    = False
+                , applied      = False
                 , command      = msg
                 }
             return ( r { log = IntMap.insert key entry (log r) }, (False, leader r))
+
+-- | Applies entries in the log to state machine.
+applyLog :: ClusterState -> MVar (RaftState a) -> Process ()
+applyLog c mr = do
+    finished <- liftIO $ modifyMVarMasked mr $ \r -> do
+        if lastApplied r >= commitIndex r 
+            then return (r, True)
+            else 
+                let lastApplied' = succ . lastApplied $ r
+                    entry        = (log r) IntMap.! lastApplied'
+                    entry'       = entry { applied = True }
+                in return (r {
+                    lastApplied = lastApplied'
+                  , log         = IntMap.insert lastApplied' entry' (log r)
+                }, False)
+
+    -- Loop until finish applying all
+    if finished
+        then return ()
+        else applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -491,8 +514,6 @@ leaderThread c mr u = do
             then return r { commitIndex = head ns }
             else return r
 
-    -- TODO: advance state machine 
-
     -- Loop forever
     leaderThread c mr u
   where
@@ -547,8 +568,8 @@ raftThread c mr = do
     -- Die when parent does
     link $ mainPid c
    
-   -- Choose election timeout between 150ms and 300ms
-    timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
+   -- Choose election timeout between 150ms and 600ms
+    timeout <- liftIO (uniformR (150000, 2*300000) (randomGen c) :: IO Int)
 
     -- Update cluster with raftPid
     selfPid <- getSelfPid
@@ -565,8 +586,6 @@ raftThread c mr = do
       , match recvAppendEntriesResponseMsg
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
-
-    say "msg received"
 
     -- Handle RPC Message
     case msg of
@@ -590,10 +609,13 @@ raftThread c mr = do
             other@_   -> return (r, False)
 
     t <- liftIO $ withMVarMasked mr $ \r -> return $ currentTerm r
-
     if s
         then say $ "I am leader of term: " ++ show t
         else return ()
+    
+    -- Advance state machine
+    applyLog c'' mr
+
     -- Loop Forever
     raftThread c'' mr
 
@@ -607,16 +629,23 @@ initRaft backend nodes = do
 
     -- Start process for handling messages and register it
     raftPid <- spawnLocal (raftThread c mr)
-    reg <- whereis "server"
-    case reg of
+    raftReg <- whereis "server"
+    case raftReg of
         Nothing -> register "server" raftPid
         _       -> reregister "server" raftPid
 
-    -- Start leader thread
-    leaderPid <- spawnLocal (leaderThread c mr 75000)
+    -- Update raftPid
+    let c' = c { raftPid = raftPid }
 
-    -- Start client thread
-    clientPid <- spawnLocal (clientThread c mr)
+    -- Start leader thread
+    leaderPid <- spawnLocal (leaderThread c' mr 75000)
+
+    -- Start client thread and register it
+    clientPid <- spawnLocal (clientThread c' mr)
+    clientReg <- whereis "client"
+    case clientReg of
+        Nothing -> register "client" clientPid
+        _       -> reregister "client" clientPid
 
     -- Kill this process if raftThread dies
     link raftPid

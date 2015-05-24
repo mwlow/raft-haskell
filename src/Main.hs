@@ -58,14 +58,14 @@ initCluster host port numNodes = do
     processes <- mapM (`forkProcess` initRaft backend nodes) nodes
     
     -- Run partition experiments...
-    threadDelay 5000000
+    --threadDelay 5000000
 
-    runProcess (nodes !! 0) (exit (processes !! 0) "ehh") 
+    --runProcess (nodes !! 0) (exit (processes !! 0) "ehh") 
 
    -- testNode <- newLocalNode backend
     --forkProcess testNode $ initRaft backend nodes 
-    threadDelay 1000000
-    forkProcess (nodes !! 0) $ initRaft backend nodes
+    --threadDelay 1000000
+    --forkProcess (nodes !! 0) $ initRaft backend nodes
     
     -- Run until receive 'q' or Control C
     whileM_ (liftM ('q' /=) getChar) $
