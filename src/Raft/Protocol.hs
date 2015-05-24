@@ -614,9 +614,14 @@ initRaft backend nodes = do
 
     -- Start leader thread
     leaderPid <- spawnLocal (leaderThread c mr 75000)
+
+    -- Start client thread
+    clientPid <- spawnLocal (clientThread c mr)
+
     -- Kill this process if raftThread dies
     link raftPid
     link leaderPid
+    link clientPid
 
     -- Hack to block
     x <- receiveWait []
