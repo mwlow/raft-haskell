@@ -32,8 +32,7 @@ testCalls nodes processes = do
     randomNodeId = Map.keys m !! randomValue
     randomProcessId = Map.lookup randomNodeId m
 
-
-
-  say "LOOK AT MEEEEEE" 
-  say (show randomNodeId)
+  
+  nsendRemote randomNodeId "client" (Command "GAVIN")
+  testCalls nodes processes
   return()

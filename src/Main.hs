@@ -3,6 +3,7 @@ import System.IO
 import System.Console.ANSI
 import System.Exit
 import System.Posix.Signals
+import System.Random.MWC
 import Control.Concurrent 
 import Control.Monad 
 import Control.Monad.Loops
@@ -26,6 +27,18 @@ resetColor = setSGR [Reset] >> putStr "" >> hFlush stdout
 
 color :: Color -> IO a -> IO a
 color c action = setColor c >> action <* resetColor
+
+
+commandTests :: [LocalNode] -> Process ()
+commandTests nodes = do
+    randomGen <- liftIO createSystemRandom
+    index <- liftIO (uniformR (0, length nodes - 1) (randomGen) :: IO Int)
+    
+    let id = localNodeId $ nodes !! index
+    say $ show id
+    nsendRemote id "client" (Command "test")
+
+
 
 -- | Handle Control C.
 cntrlc :: ThreadId -> [LocalNode] -> IO ()
@@ -59,12 +72,16 @@ initCluster host port numNodes = do
     color Cyan . putStrLn $ "==> Running Raft ('q' to exit)"
     processes <- mapM (`forkProcess` initRaft backend nodes) nodes
     
+    -- Create a client node to run tests
+    clientNode <- newLocalNode backend
 
-
+    -- Run command test on client
+    threadDelay 5000000
+    runProcess clientNode (commandTests nodes)
 
 
     -- Run partition experiments...
-    threadDelay 5000000
+    --threadDelay 5000000
 
 
     --This is the code the spawns the test thread
@@ -75,8 +92,8 @@ initCluster host port numNodes = do
 
    -- testNode <- newLocalNode backend
     --forkProcess testNode $ initRaft backend nodes 
-    threadDelay 1000000
-    forkProcess (nodes !! 0) $ initRaft backend nodes
+    --threadDelay 1000000
+    --forkProcess (nodes !! 0) $ initRaft backend nodes
     
     -- Run until receive 'q' or Control C
     whileM_ (liftM ('q' /=) getChar) $
