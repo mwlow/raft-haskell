@@ -17,22 +17,21 @@ import qualified Data.Map as Map
 import Raft.Protocol
 
 
-testCalls :: [LocalNode] -> [a0] -> Process()
-testCalls nodes processes = do  
+testCalls :: [LocalNode] -> [a0] -> GenIO -> Process()
+testCalls nodes processes randomGen = do  
   -- Code to run tests. Zip node and processes into a map
   -- then send to test calls
   let
     nodeIDs = map localNodeId nodes
     nodeList = zip nodeIDs processes
     m = Map.fromList (nodeList)
-  randomGen <- liftIO createSystemRandom
 
   randomValue <- liftIO (uniformR (0, Map.size m - 1) (randomGen) :: IO Int)
   let
     randomNodeId = Map.keys m !! randomValue
     randomProcessId = Map.lookup randomNodeId m
 
-  
+  liftIO (threadDelay 4000000)
   nsendRemote randomNodeId "client" (Command "GAVIN")
   testCalls nodes processes
   return()

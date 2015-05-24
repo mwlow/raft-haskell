@@ -87,9 +87,8 @@ initCluster host port numNodes = do
 
     --This is the code the spawns the test thread
     testNode <- newLocalNode backend
+    
     runProcess testNode (testCalls nodes processes)
-
-    runProcess (nodes !! 0) (exit (processes !! 0) "ehh") 
 
    -- testNode <- newLocalNode backend
     --forkProcess testNode $ initRaft backend nodes 
