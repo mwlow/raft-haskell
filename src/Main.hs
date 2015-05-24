@@ -55,22 +55,26 @@ commandTests backend nodes processes = do
             live = Map.difference m (Map.fromList dead)
             r'   = (uniformR (0, Map.size live - 1) (randomGen) :: IO Int)
 
+        --(nodeId, (localnode, processId))
+        color Red (print "--")
+        mapM_ (\(_, (_, pid)) -> color Yellow (print pid)) dead
+
         -- Stop them
         forkProcess testNode $ mapM_ ((`exit` "") . snd . snd) dead 
-        threadDelay 1000000
+        threadDelay 5000000
 
         -- Send some messages
         t <- (uniformR (1, 1) (randomGen) :: IO Int)
         forkProcess testNode $ forM_ [1..t] $ \i -> do
             r <- liftIO r'
             nsendRemote (fst $ Map.elemAt r live) "client" (Command $ show i)
-        threadDelay 1000000
+        threadDelay 5000000
         
         -- Restart them
         l <- mapM (\(k, (n, _)) -> do
                 p <- forkProcess n $ initRaft backend nodes
                 return (k, (n, p))) dead
-        threadDelay 1000000
+        threadDelay 5000000
 
         -- Update map
         let m' = Map.union (Map.fromList l) m

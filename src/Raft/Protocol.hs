@@ -600,6 +600,9 @@ raftThread c mr = do
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
 
+    l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
+    say $ show (IntMap.size l)
+
     -- Handle RPC Message
     case msg of
         RpcAppendEntriesMsg m -> handleAppendEntriesMsg c'' mr m
