@@ -512,7 +512,7 @@ leaderThread c mr u = do
         Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
 
     -- Advance commit index
-    liftIO $ modifyMVarMasked_ mr $ \r -> do
+    v <- liftIO $ modifyMVarMasked mr $ \r -> do
         let n = filter (\v -> logTerm (log r) v == currentTerm r)
                         [commitIndex r + 1 .. IntMap.size $ log r]
             pred :: Index -> Bool
@@ -521,11 +521,18 @@ leaderThread c mr u = do
             ns = filter pred n
 
         if state r == Leader && not (null ns)
-            then return r { commitIndex = head ns }
-            else return r
+            then return (r { commitIndex = head ns }, True)
+            else return (r, False)
+    
+    --say $ show v
+    (log, state) <- liftIO $ withMVarMasked mr $ \r -> return (log r, state r)
+    if state == Leader
+        then say $ show (IntMap.size log)
+        else say $ show (IntMap.size log)
 
     -- Loop forever
     leaderThread c mr u
+
   where
     handleLeader :: ClusterState 
                  -> RaftState a 
