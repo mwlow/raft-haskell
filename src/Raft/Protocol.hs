@@ -395,7 +395,6 @@ handleCommandMsg :: Serializable a
                  -> Process ()
 handleCommandMsg c mr msg = do
     (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    say $ show forwardMsg ++ " " ++ show leader
     case leader of
         Nothing -> return ()
         Just l  -> if forwardMsg
@@ -413,7 +412,7 @@ handleCommandMsg c mr msg = do
     handleMsg c r msg
         | state r /= Leader = return (r, (True, leader r))
         | otherwise = do
-            let key = 1 + fst (IntMap.findMax (log r))
+            let key = 1 + IntMap.size (log r)
                 entry = LogEntry {
                   termReceived = currentTerm r
                 , applied      = False
@@ -447,8 +446,6 @@ electionThread :: ClusterState -> MVar (RaftState a) -> Process ()
 electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
-
-    say "Election started!"
 
     -- Update raftState and create (Maybe RequestVoteMsg)
     msg <- liftIO $ modifyMVarMasked mr $ \r -> do
@@ -516,7 +513,7 @@ leaderThread c mr u = do
         Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
 
     -- Advance commit index
-    v <- liftIO $ modifyMVarMasked mr $ \r -> do
+    liftIO $ modifyMVarMasked_ mr $ \r -> do
         let n = filter (\v -> logTerm (log r) v == currentTerm r)
                         [commitIndex r + 1 .. IntMap.size $ log r]
             pred :: Index -> Bool
@@ -525,14 +522,8 @@ leaderThread c mr u = do
             ns = filter pred n
 
         if state r == Leader && not (null ns)
-            then return (r { commitIndex = head ns }, True)
-            else return (r, False)
-    
-    --say $ show v
-    (log, state) <- liftIO $ withMVarMasked mr $ \r -> return (log r, state r)
-    if state == Leader
-        then say $ show (IntMap.size log)
-        else say $ show (IntMap.size log)
+            then return r { commitIndex = head ns }
+            else return r
 
     -- Loop forever
     leaderThread c mr u
