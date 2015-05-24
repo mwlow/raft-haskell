@@ -29,6 +29,7 @@ import Control.Distributed.Process.Extras (isProcessAlive)
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process.Serializable
+import Control.Distributed.Process.Internal.Types
 import Text.Printf
 import Data.Binary
 import Data.Typeable
@@ -128,6 +129,7 @@ data RpcMessage a
     | RpcAppendEntriesResponseMsg AppendEntriesResponseMsg
     | RpcRequestVoteMsg RequestVoteMsg
     | RpcRequestVoteResponseMsg RequestVoteResponseMsg
+    | RpcCommandMsg (Command a)
 
 -- | These wrapping functions return the message in an RPCMsg type.
 recvSay :: String -> Process (RpcMessage a)
@@ -156,16 +158,20 @@ recvRequestVoteMsg a = return $ RpcRequestVoteMsg a
 recvRequestVoteResponseMsg :: RequestVoteResponseMsg -> Process (RpcMessage a)
 recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 
+recvCommandMsg :: Command a -> Process (RpcMessage a)
+recvCommandMsg a = return $ RpcCommandMsg a
+
 
 -- | This is the process's local view of the entire cluster. Information
 -- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
     { backend     :: Backend                  -- ^ Backend for the topology
+    , numNodes    :: Int
     , selfNodeId  :: NodeId                   -- ^ nodeId of current server
     , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
     , peers       :: [NodeId]                 -- ^ nodeIds \\ [selfNodeId]
-    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
-    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
+--    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
+--    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
 
     , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
     , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
@@ -173,24 +179,53 @@ data ClusterState = ClusterState
     , randomGen   :: GenIO         -- ^ Random generator for random events
     }
 
+newCluster :: Backend -> [LocalNode] -> Process (ClusterState)
+newCluster backend nodes = do 
+    selfPid   <- getSelfPid
+    randomGen <- liftIO createSystemRandom
+    
+    return ClusterState {
+        backend    = backend
+      , numNodes   = length nodes
+      , selfNodeId = processNodeId selfPid
+      , nodeIds    = localNodeId <$> nodes 
+      , peers      = (localNodeId <$> nodes) \\ [processNodeId selfPid]
+      , mainPid    = selfPid
+      , raftPid    = nullProcessId (processNodeId selfPid)
+      , delayPid   = nullProcessId (processNodeId selfPid)
+      , randomGen  = randomGen
+    }
 
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader       :: Maybe NodeId                  
-    , state        :: ServerRole
-    , currentTerm  :: Term
-    , votedFor     :: Maybe NodeId
-    , log          :: Log a
-    , commitIndex  :: Index
-    , lastApplied  :: Index
+    { leader          :: Maybe NodeId               
+    , state           :: ServerRole
+    , currentTerm     :: Term
+    , votedFor        :: Maybe NodeId
+    , log             :: Log a
+    , commitIndex     :: Index
+    , lastApplied     :: Index
 
-    , nextIndexMap    :: Map.Map NodeId Index
-    , matchIndexMap   :: Map.Map NodeId Index
+    , nextIndexMap    :: Map.Map NodeId Index --TODO: Should this include self?
+    , matchIndexMap   :: Map.Map NodeId Index --TODO: Should this include self?
 
-    , voteCount    :: Int
+    , voteCount       :: Int
     }
 
+newRaftState :: [LocalNode] -> RaftState a
+newRaftState nodes = RaftState {
+        leader        = Nothing
+      , state         = Follower
+      , currentTerm   = 0
+      , votedFor      = Nothing
+      , log           = IntMap.empty 
+      , commitIndex   = 0
+      , lastApplied   = 0
+      , nextIndexMap  = Map.fromList $ zip (localNodeId <$> nodes) [1, 1..]
+      , matchIndexMap = Map.fromList $ zip (localNodeId <$> nodes) [0, 0..]
+      , voteCount     = 0
+    }
 
 -- | Helper Functions
 stepDown :: RaftState a -> Term -> RaftState a
@@ -215,17 +250,20 @@ handleRequestVoteMsg :: ClusterState
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    send (rvSender msg) (RequestVoteResponseMsg (mainPid c) t g)
+    say $ "requestvote, granted: " ++ show g 
+    send (rvSender msg) (RequestVoteResponseMsg (raftPid c) t g)
   where
-    handleMsg :: ClusterState 
+    handleMsg :: ClusterState
               -> RaftState a 
               -> RequestVoteMsg 
               -> IO (RaftState a, (Term, Bool))
     handleMsg c r
-        (RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
-        | term > rCurrentTerm = return (stepDown r term, (term, False))
+        msg@(RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | term < rCurrentTerm = return (r, (rCurrentTerm, False))
-        | rVotedFor `elem` [Nothing, Just candidateId] && isUpToDate =
+        | rVotedFor `elem` [Nothing, Just candidateId] && 
+            (lastLogTerm > rLastLogTerm || 
+                (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)) =
             return (r { votedFor = Just candidateId }, (term, True))
         | otherwise = return (r, (rCurrentTerm, False))
       where
@@ -235,35 +273,28 @@ handleRequestVoteMsg c mr msg = do
         rCurrentTerm   = currentTerm r
         rLastLogTerm   = logTerm (log r) rLogSize
 
-        isUpToDate :: Bool
-        isUpToDate = lastLogTerm > rLastLogTerm || 
-            (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)
-
 
 -- | Handle Request Vote response from peer
 handleRequestVoteResponseMsg :: ClusterState
-                             -> RaftState a
+                             -> MVar (RaftState a)
                              -> RequestVoteResponseMsg
-                             -> Process (ClusterState, RaftState a)
-handleRequestVoteResponseMsg clusterState nodeState
-    (RequestVoteResponseMsg 
-        sender 
-        term 
-        granted)
-    | term > nCurrentTerm =
-        return (clusterState, stepDown nodeState term)
-    | otherwise =
-        case nState of
-            Candidate ->
-                if nCurrentTerm == term && granted
-                    then return (clusterState 
-                               , nodeState { voteCount = nVoteCount + 1 })
-                    else return (clusterState, nodeState)
-            other@_   -> return (clusterState, nodeState)
+                             -> Process ()
+handleRequestVoteResponseMsg c mr msg =
+    liftIO $ modifyMVarMasked_ mr $ \r -> handleMsg c r msg
   where
-    nState         = state nodeState
-    nCurrentTerm   = currentTerm nodeState
-    nVoteCount     = voteCount nodeState
+    handleMsg :: ClusterState 
+              -> RaftState a 
+              -> RequestVoteResponseMsg 
+              -> IO (RaftState a)
+    handleMsg c r msg@(RequestVoteResponseMsg sender term granted)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
+        | rState == Candidate && rCurrentTerm == term && granted =
+            return r { voteCount = rVoteCount + 1 }
+        | otherwise = return r
+      where
+        rState         = state r
+        rCurrentTerm   = currentTerm r
+        rVoteCount     = voteCount r
 
 
 -- | Handle Append Entries request from peer
@@ -271,107 +302,107 @@ handleAppendEntriesMsg :: ClusterState
                        -> MVar (RaftState a)
                        -> AppendEntriesMsg a
                        -> Process ()
-handleAppendEntriesMsg c mr
-    (AppendEntriesMsg
-        sender
-        term
-        leaderId
-        prevLogIndex
-        prevLogTerm
-        entries
-        leaderCommit) = return ()
-    {-
-    | term > nCurrentTerm = do
-        reply term 0 False
-        return (clusterState, stepDown nodeState term)
-    | nCurrentTerm > term = do
-        reply nCurrentTerm 0 False
-        return (clusterState, nodeState)
-    | otherwise = do 
-        let n0 = nodeState { leader = leaderId, state = Follower }
-        if success 
-            then do 
-                let oldLog = log nodeState
-                    newLog = appendLog oldLog entries prevLogIndex
-                    index = IntMap.size newLog
-                    n0 = nodeState 
-                         { log = newLog
-                         , commitIndex = min leaderCommit index
-                         }
-                reply nCurrentTerm index True
-                return (clusterState, n0)
-            else do
-                reply nCurrentTerm 0 False
-                return (clusterState, nodeState)
+handleAppendEntriesMsg c mr msg = do
+    (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
-    nLog           = log nodeState
-    nLogSize       = IntMap.size nLog
-    nVotedFor      = votedFor nodeState
-    nCurrentTerm   = currentTerm nodeState
-    nLastLogTerm   = logTerm (log nodeState) nLogSize
-
-    success :: Bool
-    success = prevLogIndex == 0 ||
-                (prevLogIndex <= nLogSize && 
-                 logTerm (log nodeState) prevLogIndex == prevLogIndex)
-
-    reply :: Term -> Index -> Bool -> Process ()
-    reply term matchIndex granted = do
-        self <- getSelfPid
-        send sender (AppendEntriesResponseMsg self seqno term matchIndex granted)
-
-    appendLog :: Log a -> Log a -> Index -> Log a
-    appendLog dstLog srcLog prevLogIndex
-        | IntMap.null srcLog = dstLog
-        | otherwise = 
-            if logTerm dstLog index /= termReceived headSrcLog
-                then appendLog (IntMap.insert index headSrcLog dstLog)
-                                tailSrcLog
-                                index
-                else appendLog dstLog tailSrcLog index
+    handleMsg :: ClusterState
+              -> RaftState a 
+              -> AppendEntriesMsg a
+              -> IO (RaftState a, (Term, Bool, Index))
+    handleMsg c r 
+        msg@(AppendEntriesMsg
+            sender term leaderId prevLogIndex prevLogTerm entries leaderCommit)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
+        | term < rCurrentTerm = return (r, (rCurrentTerm, False, 0))
+        | prevLogIndex == 0 || 
+            (prevLogIndex <= rLogSize && 
+                logTerm (log r) prevLogIndex == prevLogIndex) = do
+            let rLog' = appendLog rLog entries prevLogIndex
+                index = IntMap.size rLog'
+                r'    = r { log = rLog', commitIndex = min leaderCommit index }
+            return (r', (rCurrentTerm, True, index))
+        | otherwise = return (r, (rCurrentTerm, False, 0))
       where
-        index = prevLogIndex + 1
-        ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
-        -- TODO This is currently O(n)
-        initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
--}
+        rLog           = log r
+        rLogSize       = IntMap.size rLog
+        rVotedFor      = votedFor r
+        rCurrentTerm   = currentTerm r
+        rLastLogTerm   = logTerm (log r) rLogSize
+        appendLog :: Log a -> Log a -> Index -> Log a
+        appendLog dstLog srcLog prevLogIndex
+            | IntMap.null srcLog = dstLog
+            | logTerm dstLog index /= termReceived headSrcLog = 
+                appendLog (IntMap.insert index headSrcLog dstLog) tailSrcLog index
+            | otherwise = appendLog dstLog tailSrcLog index
+          where
+            index = prevLogIndex + 1
+            ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
+            -- TODO This is currently O(n)
+            initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
+
 
 -- | Handle Append Entries response from peer
--- TRY THIS OUT GABRIEL
 handleAppendEntriesResponseMsg :: ClusterState
-                               -> RaftState a
+                               -> MVar (RaftState a)
                                -> AppendEntriesResponseMsg
-                               -> Process (ClusterState, RaftState a)
-handleAppendEntriesResponseMsg clusterState raftState
-    (AppendEntriesResponseMsg
-        sender
-        term
-        matchIndex
-        success) 
-    |  term > nCurrentTerm =
-        return (clusterState, stepDown raftState term)
-    | otherwise =
-        case nState of
-            Candidate ->
-                if nCurrentTerm == term && success
-                    then return (clusterState 
-                               , raftState { matchIndexMap = 
-                                                Map.insert (processNodeId sender) matchIndex (matchIndexMap raftState),
-                                             nextIndexMap = 
-                                                Map.insert (processNodeId sender) (matchIndex + 1) (nextIndexMap raftState)})
-                    else return (clusterState, 
-                                raftState{
-                                nextIndexMap = Map.insert (processNodeId sender) (max 1 (indexLookup (processNodeId sender) (nextIndexMap raftState))) (nextIndexMap raftState)})
-            other@_   -> return (clusterState, raftState)
-    where 
-        nState         = state raftState
-        nCurrentTerm   = currentTerm raftState
+                               -> Process ()
+handleAppendEntriesResponseMsg c mr msg =
+    liftIO $ modifyMVarMasked_ mr $ \r -> handleMsg c r msg
+  where
+    handleMsg :: ClusterState
+              -> RaftState a 
+              -> AppendEntriesResponseMsg
+              -> IO (RaftState a)
+    handleMsg c r 
+        (AppendEntriesResponseMsg sender term matchIndex success)
+        | term > rCurrentTerm = return $ stepDown r term
+        | rState == Leader && rCurrentTerm == term =
+            if success
+                then return r { 
+                    matchIndexMap = Map.insert peer matchIndex rMatchIndexMap
+                  , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
+                } 
+                else return r {
+                    nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
+                }
+        | otherwise = return r
+      where
+        peer           = processNodeId sender
+        rState         = state r
+        rCurrentTerm   = currentTerm r
+        rMatchIndexMap = matchIndexMap r
+        rNextIndexMap  = nextIndexMap r
+        rNextIndex     = rNextIndexMap Map.! peer
 
-        indexLookup :: NodeId -> Map.Map NodeId Index -> Int  
-        indexLookup pid map =   
-            case Map.lookup pid map of   
-                Nothing -> 0
-                Just value -> value - 1
+
+handleCommandMsg :: Serializable a
+                 => ClusterState
+                 -> MVar (RaftState a)
+                 -> Command a
+                 -> Process ()
+handleCommandMsg c mr msg = do
+    (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    case leader of
+        Nothing -> return ()
+        Just l  -> if forwardMsg
+            then nsendRemote l "client" msg >> return ()
+            else return ()
+  where
+    handleMsg :: ClusterState 
+              -> RaftState a 
+              -> Command a 
+              -> IO (RaftState a, (Bool, Maybe NodeId))
+    handleMsg c r msg
+        | state r /= Leader = return (r, (True, leader r))
+        | otherwise = do
+            let key = 1 + fst (IntMap.findMax (log r))
+                entry = LogEntry {
+                  termReceived = currentTerm r
+                , committed    = False
+                , command      = msg
+                }
+            return ( r { log = IntMap.insert key entry (log r) }, (False, leader r))
 
 
 -- | This thread starts a new election.
@@ -380,12 +411,14 @@ electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
+    say "Election started!"
+
     -- Update raftState and create (Maybe RequestVoteMsg)
     msg <- liftIO $ modifyMVarMasked mr $ \r -> do
         if state r == Leader
             then return (r, Nothing)
             else 
-                let r0 = r { state          = Candidate 
+                let r' = r { state          = Candidate 
                            , votedFor       = Just $ selfNodeId c
                            , currentTerm    = 1 + currentTerm r
                            , voteCount      = 1
@@ -394,12 +427,12 @@ electionThread c mr = do
                            }
                     msg = RequestVoteMsg 
                            { rvSender     = raftPid c 
-                           , rvTerm       = currentTerm r0
+                           , rvTerm       = currentTerm r'
                            , candidateId  = selfNodeId c
                            , lastLogIndex = IntMap.size $ log r
                            , lastLogTerm  = logTerm (log r) (IntMap.size $ log r)
                            }
-                in return (r0, Just msg)
+                in return (r', Just msg)
     
     case msg of
         -- New election started, send RequestVoteMsg to all peers
@@ -425,6 +458,89 @@ delayThread c mr t = do
     return ()
 
 
+-- | This thread only performs work when the server is the leader.
+-- TODO: How does this thread affect election timeout?
+-- TODO: How does leader deal with election timeout?
+leaderThread :: (Serializable a) 
+             => ClusterState -> MVar (RaftState a) -> Int -> Process ()
+leaderThread c mr u = do
+    -- Die when parent does
+    link $ mainPid c
+
+    -- Delay u ns to main update rate
+    liftIO $ threadDelay u
+
+    -- Create AppendEntries
+    msgsM <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
+
+    -- Send them if they were created
+    case msgsM of
+        Nothing   -> return ()
+        Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
+
+    -- Advance commit index
+    liftIO $ modifyMVarMasked_ mr $ \r -> do
+        let n = filter (\v -> logTerm (log r) v == currentTerm r)
+                        [commitIndex r + 1 .. IntMap.size $ log r]
+            pred :: Index -> Bool
+            pred v = numNodes c `div` 2 < 
+                        Map.size (Map.filter (>=v) $ matchIndexMap r)
+            ns = filter pred n
+
+        if state r == Leader && not (null ns)
+            then return r { commitIndex = head ns }
+            else return r
+
+    -- TODO: advance state machine 
+
+    -- Loop forever
+    leaderThread c mr u
+  where
+    handleLeader :: ClusterState 
+                 -> RaftState a 
+                 -> IO (RaftState a, Maybe [(NodeId, AppendEntriesMsg a)])
+    handleLeader c r
+        | state r == Leader = return $ foldr (\n (r', Just a) ->
+            let r'MatchIndexMap = matchIndexMap r'
+                r'NextIndexMap  = nextIndexMap r'
+                r'Log           = log r'
+                r'LogSize       = IntMap.size r'Log
+                r'NextIndex     = r'NextIndexMap Map.! n
+                r'LastIndex     = r'LogSize
+                r'MatchIndex    = r'MatchIndexMap Map.! n
+            in 
+                let msg = AppendEntriesMsg {
+                        aeSender     = raftPid c
+                      , aeTerm       = currentTerm r'
+                      , leaderId     = selfNodeId c
+                      , prevLogIndex = r'NextIndex - 1
+                      , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
+                      , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
+                      , leaderCommit = commitIndex r'
+                    }
+                    r'' = r' { 
+                        nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
+                    }
+                in (r'', Just $ (n, msg):a)
+            ) (r, Just []) (peers c)
+        | otherwise = return (r, Nothing)
+
+
+-- | This thread handles commands from clients and forwards them
+-- to the leader.
+clientThread :: Serializable a => ClusterState -> MVar (RaftState a) -> Process ()
+clientThread c mr = do 
+    -- Die when parent does
+    link $ mainPid c
+   
+    (RpcCommandMsg m) <- receiveWait [ match recvCommandMsg ]
+    
+    handleCommandMsg c mr m
+
+    -- loop forever
+    clientThread c mr
+
+
 -- | Main loop of the program.
 raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
@@ -434,10 +550,14 @@ raftThread c mr = do
    -- Choose election timeout between 150ms and 300ms
     timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
 
+    -- Update cluster with raftPid
+    selfPid <- getSelfPid
+    let c' = c { raftPid = selfPid }
+
     -- Restart election delay thread
-    kill (delayPid c) "restart"
-    delayPid <- spawnLocal $ delayThread c mr timeout
-    let c0 = c { delayPid = delayPid }
+    kill (delayPid c') "restart"
+    delayPid <- spawnLocal $ delayThread c' mr timeout
+    let c'' = c' { delayPid = delayPid }
 
     -- Block for RPC Messages
     msg <- receiveWait
@@ -446,75 +566,62 @@ raftThread c mr = do
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
 
+    say "msg received"
+
     -- Handle RPC Message
     case msg of
-        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c mr m
-        RpcRequestVoteMsg m -> handleRequestVoteMsg c mr m
+        RpcAppendEntriesMsg m -> handleAppendEntriesMsg c'' mr m
+        RpcAppendEntriesResponseMsg m -> handleAppendEntriesResponseMsg c'' mr m
+        RpcRequestVoteMsg m -> handleRequestVoteMsg c'' mr m
+        RpcRequestVoteResponseMsg m -> handleRequestVoteResponseMsg c'' mr m
         other@_ -> return ()
 
+    -- Update if become leader
+    s <- liftIO $ modifyMVarMasked mr $ \r -> do
+        case state r of
+            Candidate -> if voteCount r > numNodes c'' `div` 2
+                then return (r {
+                    state        = Leader
+                  , leader       = Just $ selfNodeId c''
+                  , nextIndexMap = Map.fromList $
+                        zip (nodeIds c'') $ repeat $ 1 + IntMap.size (log r)
+                }, True)
+                else return (r, False)
+            other@_   -> return (r, False)
 
-    return ()
+    t <- liftIO $ withMVarMasked mr $ \r -> return $ currentTerm r
+
+    if s
+        then say $ "I am leader of term: " ++ show t
+        else return ()
+    -- Loop Forever
+    raftThread c'' mr
 
 
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do
-    selfPid <- getSelfPid
-    selfNid <- getSelfNode
 
-     -- Initialize state
-    randomGen <- liftIO createSystemRandom
-    let
-        placeHolder = localNodeId <$> nodes  
-        clusterState = ClusterState{
-            backend = backend
-            , selfNodeId  = selfNid         -- ^ nodeId of current server
-            , nodeIds   =  localNodeId <$> nodes             -- ^ List of nodeIds in the topology
-            , peers       = placeHolder \\ [selfNid]              -- ^ nodeIds \\ [selfNodeId]
-            , knownIds    = Map.empty-- ^ Map of known processIds
-            , unknownIds  = Map.empty -- ^ Map of unknown processIds
-            , mainPid     = selfPid -- ^ ProcessId of the master thread
-            , raftPid     = selfPid  -- ^ ProcessId of the thread running Raft
-            , delayPid    = selfPid -- ^ ProcessId of the delay thread
-            , randomGen   = randomGen        -- ^ Random generator for random events
-        }
+    -- Initialize state
+    c <- newCluster backend nodes
+    mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
 
-        raftState = RaftState{ 
-            leader         = Nothing            
-            , state        = Follower
-            , currentTerm  = 0
-            , votedFor     = Nothing
-            , log          = IntMap.empty :: IntMap.IntMap (LogEntry String)
-            , commitIndex  = 0
-            , lastApplied  = 0
-
-            , nextIndexMap    = Map.empty
-            , matchIndexMap   = Map.empty
-
-            , voteCount    = 0
-        }
-
-    mr <- liftIO $ newEmptyMVar
-    liftIO $ putMVar mr raftState
-    --mr <- liftIO $ newEmptyMVar >>= (`putMVar` raftState) >>= return
-
-     -- Start process for handling messages and register it
-    serverPid <- spawnLocal (raftThread clusterState mr)
+    -- Start process for handling messages and register it
+    raftPid <- spawnLocal (raftThread c mr)
     reg <- whereis "server"
     case reg of
-        Nothing -> register "server" serverPid
-        other@_ -> reregister "server" serverPid
+        Nothing -> register "server" raftPid
+        _       -> reregister "server" raftPid
 
-    -- Kill this process if server dies
-    link serverPid
-
-    mapM_ (\x -> nsendRemote x "server" (serverPid, "ping")) (localNodeId <$> nodes)
-
+    -- Start leader thread
+    leaderPid <- spawnLocal (leaderThread c mr 75000)
+    -- Kill this process if raftThread dies
+    link raftPid
+    link leaderPid
 
     -- Hack to block
     x <- receiveWait []
 
     return ()
-
 
 
 {-
