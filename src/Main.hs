@@ -35,6 +35,8 @@ commandTests nodes = do
     let id = localNodeId $ nodes !! index
     say $ show id
     nsendRemote id "client" (Command "test")
+    nsendRemote id "client" (Command "test2")
+    nsendRemote id "client" (Command "test3")
 
 
 -- | Handle Control C.

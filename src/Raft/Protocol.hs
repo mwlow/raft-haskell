@@ -443,8 +443,6 @@ electionThread c mr = do
     -- Die when parent does
     link $ mainPid c
 
-    say "Election started!"
-
     -- Update raftState and create (Maybe RequestVoteMsg)
     msg <- liftIO $ modifyMVarMasked mr $ \r -> do
         if state r == Leader
