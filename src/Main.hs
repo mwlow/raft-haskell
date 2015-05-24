@@ -12,6 +12,8 @@ import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import qualified Data.Map as Map
+import Data.List
+import Data.Function
 import Text.Read
 import Text.Printf
 
@@ -48,8 +50,9 @@ commandTests backend nodes processes = do
         -- Randomly select a random number of (node, pid) to stop.
         let r = (uniformR (0, Map.size m - 1) (randomGen) :: IO Int)
         n <- (uniformR (0, Map.size m `div` 2) (randomGen) :: IO Int)
-        k <- replicateM n $ (`Map.elemAt` m) <$> r
-
+        a <- nub <$> replicateM n r
+        let k = (`Map.elemAt` m) <$> a
+    
         -- Stop them
         forkProcess testNode $ mapM_ ((`kill` "") . snd . snd) k 
         threadDelay 500000
