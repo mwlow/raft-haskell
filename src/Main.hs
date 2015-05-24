@@ -56,14 +56,14 @@ commandTests backend nodes processes = do
             r'   = (uniformR (0, Map.size live - 1) (randomGen) :: IO Int)
 
         -- Stop them
-        forkProcess testNode $ mapM_ ((`kill` "") . snd . snd) dead 
+        forkProcess testNode $ mapM_ ((`exit` "") . snd . snd) dead 
         threadDelay 500000
 
         -- Send some messages
-        t <- (uniformR (1, 10) (randomGen) :: IO Int)
-        forkProcess testNode $ forM_ [1..t] $ \i -> do
-            r <- liftIO r'
-            nsendRemote (fst $ Map.elemAt r live) "client" (Command $ show i)
+        --t <- (uniformR (1, 1) (randomGen) :: IO Int)
+        --forkProcess testNode $ forM_ [1..t] $ \i -> do
+            --r <- liftIO r'
+            --nsendRemote (fst $ Map.elemAt r live) "client" (Command $ show i)
 
         -- Restart them
         l <- mapM (\(k, (n, _)) -> do

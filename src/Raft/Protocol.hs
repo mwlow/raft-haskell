@@ -388,7 +388,7 @@ handleAppendEntriesResponseMsg c mr msg =
         rNextIndex     = rNextIndexMap Map.! peer
 
 -- | Handle command message from a client. If leader, write to log. Else
--- forward to leader. 
+-- forward to leader. If there is no leader...send back to self
 handleCommandMsg :: Serializable a
                  => ClusterState
                  -> MVar (RaftState a)
@@ -397,7 +397,9 @@ handleCommandMsg :: Serializable a
 handleCommandMsg c mr msg = do
     (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
     case leader of
-        Nothing -> return ()
+        Nothing -> if forwardMsg
+            then nsend "client" msg >> return ()
+            else return ()
         Just l  -> if forwardMsg
             then nsendRemote l "client" msg >> return ()
             else return ()
