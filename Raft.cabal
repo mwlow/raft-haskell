@@ -17,7 +17,7 @@ cabal-version:       >=1.10
 
 executable Raft
   main-is:             Main.hs
-  other-modules:       Raft.Protocol
+  other-modules:       Raft.Protocol, Test
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8, distributed-process,
                        binary, network-transport-tcp, containers,

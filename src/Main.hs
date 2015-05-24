@@ -10,10 +10,12 @@ import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
+import qualified Data.Map as Map
 import Text.Read
 import Text.Printf
 
 import Raft.Protocol
+import Test
 
 -- | Colors!
 setColor :: Color -> IO ()
@@ -57,8 +59,17 @@ initCluster host port numNodes = do
     color Cyan . putStrLn $ "==> Running Raft ('q' to exit)"
     processes <- mapM (`forkProcess` initRaft backend nodes) nodes
     
+
+
+
+
     -- Run partition experiments...
     threadDelay 5000000
+
+
+    --This is the code the spawns the test thread
+    testNode <- newLocalNode backend
+    runProcess testNode (testCalls nodes processes)
 
     runProcess (nodes !! 0) (exit (processes !! 0) "ehh") 
 

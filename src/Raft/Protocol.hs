@@ -354,9 +354,8 @@ handleAppendEntriesResponseMsg c mr msg =
               -> RaftState a 
               -> AppendEntriesResponseMsg
               -> IO (RaftState a)
-    handleMsg c r 
-        (AppendEntriesResponseMsg sender term matchIndex success)
-        | term > rCurrentTerm = return $ stepDown r term
+    handleMsg c r msg@(AppendEntriesResponseMsg sender term matchIndex success)
+        | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | rState == Leader && rCurrentTerm == term =
             if success
                 then return r { 
@@ -374,7 +373,6 @@ handleAppendEntriesResponseMsg c mr msg =
         rMatchIndexMap = matchIndexMap r
         rNextIndexMap  = nextIndexMap r
         rNextIndex     = rNextIndexMap Map.! peer
-
 
 handleCommandMsg :: Serializable a
                  => ClusterState
