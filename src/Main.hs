@@ -11,6 +11,7 @@ import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
+import qualified Data.Map as Map
 import Text.Read
 import Text.Printf
 
@@ -27,16 +28,43 @@ color :: Color -> IO a -> IO a
 color c action = setColor c >> action <* resetColor
 
 
-commandTests :: [LocalNode] -> GenIO -> Process ()
-commandTests nodes randomGen = do
-    index <- liftIO (uniformR (0, length nodes - 1) (randomGen) :: IO Int)
-    
-    let id = localNodeId $ nodes !! index
-    say $ show id
-    nsendRemote id "client" (Command (show index))
+commandTests :: Backend -> [LocalNode] -> [ProcessId] -> IO ()
+commandTests backend nodes processes = do
+    -- Initialize state
+    testNode <- newLocalNode backend
+    randomGen <- liftIO createSystemRandom
+    let z = zip nodes processes
+        m = Map.fromList . zip (localNodeId <$> nodes) $ z
 
-    liftIO $ threadDelay 1000000
-    commandTests nodes randomGen
+    -- Run test loop
+    loop m randomGen testNode
+  where
+    loop :: Map.Map NodeId (LocalNode, ProcessId) -> GenIO -> LocalNode -> IO ()
+    loop m randomGen testNode = do
+        -- Catch control-c
+        tid <- myThreadId
+        installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
+
+        -- Randomly select a random number of (node, pid) to stop.
+        let r = (uniformR (0, Map.size m - 1) (randomGen) :: IO Int)
+        n <- (uniformR (0, Map.size m `div` 2) (randomGen) :: IO Int)
+        k <- replicateM n $ (`Map.elemAt` m) <$> r
+
+        -- Stop them
+        forkProcess testNode $ mapM_ ((`kill` "") . snd . snd) k 
+        threadDelay 500000
+
+        -- Restart them
+        l <- mapM (\(k, (n, _)) -> do
+                p <- forkProcess n $ initRaft backend nodes
+                return (k, (n, p))) k
+        threadDelay 500000
+
+        -- Update map
+        let m' = Map.union (Map.fromList l) m
+
+        -- Loop forever
+        loop m' randomGen testNode
 
 
 -- | Handle Control C.
@@ -70,32 +98,15 @@ initCluster host port numNodes = do
     threadDelay 500000
     color Cyan . putStrLn $ "==> Running Raft ('q' to exit)"
     processes <- mapM (`forkProcess` initRaft backend nodes) nodes
-    
-    -- Create a client node to run tests
-    clientNode <- newLocalNode backend
-
-    -- Run command test on client
-    threadDelay 5000000
-
-    randomGen <- liftIO createSystemRandom
-    runProcess clientNode (commandTests nodes randomGen)
-
+    threadDelay 500000
 
     -- Run partition experiments...
-    --threadDelay 5000000
-
-    --runProcess (nodes !! 0) (exit (processes !! 0) "ehh") 
-
-   -- testNode <- newLocalNode backend
-    --forkProcess testNode $ initRaft backend nodes 
-    --threadDelay 1000000
-    --forkProcess (nodes !! 0) $ initRaft backend nodes
+    commandTests backend nodes processes
     
     -- Run until receive 'q' or Control C
     whileM_ (liftM ('q' /=) getChar) $
         installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
 
-    --closeLocalNode testNode
     -- Clean Up
     color Cyan $ putStrLn "==> Cleaning up"
     mapM_ closeLocalNode nodes

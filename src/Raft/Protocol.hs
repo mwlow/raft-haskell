@@ -432,10 +432,12 @@ applyLog c mr = do
                   , log         = IntMap.insert lastApplied' entry' (log r)
                 }, False)
 
+    log <- liftIO $ withMVarMasked mr $ \r -> return $ log r
+
     -- Loop until finish applying all
     if finished
         then return ()
-        else applyLog c mr
+        else say ("Applied: " ++ show (IntMap.size log)) >> applyLog c mr
 
 
 -- | This thread starts a new election.
