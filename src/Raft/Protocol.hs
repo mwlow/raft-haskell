@@ -253,7 +253,6 @@ handleRequestVoteMsg :: ClusterState
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    say $ "requestvote, granted: " ++ show g 
     send (rvSender msg) (RequestVoteResponseMsg (raftPid c) t g)
   where
     handleMsg :: ClusterState
@@ -320,9 +319,9 @@ handleAppendEntriesMsg c mr msg = do
         | term < rCurrentTerm = return (r, (rCurrentTerm, False, 0))
         | prevLogIndex == 0 || 
             (prevLogIndex <= rLogSize && 
-                logTerm (log r) prevLogIndex == prevLogIndex) = do
+                logTerm (log r) prevLogIndex == prevLogTerm) = do
             let rLog' = appendLog rLog entries prevLogIndex
-                index = IntMap.size rLog'
+                index = prevLogIndex + IntMap.size entries
                 r'    = r { 
                             log         = rLog'
                           , commitIndex = min leaderCommit index
@@ -434,7 +433,7 @@ applyLog c mr = do
     -- Loop until finish applying all
     if finished
         then return ()
-        else say "applied" >> applyLog c mr
+        else say "Applied" >> applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -521,6 +520,11 @@ leaderThread c mr u = do
             then return r { commitIndex = head ns }
             else return r
 
+    e <- liftIO $ withMVarMasked mr $ \r -> return r
+    if state e == Leader
+        then say $ show (commitIndex e) ++ " " ++ show (IntMap.size $ log e)
+        else return ()
+
     -- Loop forever
     leaderThread c mr u
 
@@ -563,7 +567,7 @@ clientThread c mr = do
     link $ mainPid c
    
     (RpcCommandMsg m) <- receiveWait [ match recvCommandMsg ]
-    say $ "Received something"
+
     handleCommandMsg c mr m
 
     -- loop forever

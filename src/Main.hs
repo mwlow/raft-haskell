@@ -27,16 +27,16 @@ color :: Color -> IO a -> IO a
 color c action = setColor c >> action <* resetColor
 
 
-commandTests :: [LocalNode] -> Process ()
-commandTests nodes = do
-    randomGen <- liftIO createSystemRandom
+commandTests :: [LocalNode] -> GenIO -> Process ()
+commandTests nodes randomGen = do
     index <- liftIO (uniformR (0, length nodes - 1) (randomGen) :: IO Int)
     
     let id = localNodeId $ nodes !! index
     say $ show id
     nsendRemote id "client" (Command "test")
-    nsendRemote id "client" (Command "test2")
-    nsendRemote id "client" (Command "test3")
+
+    liftIO $ threadDelay 2000000
+    commandTests nodes randomGen
 
 
 -- | Handle Control C.
@@ -76,7 +76,9 @@ initCluster host port numNodes = do
 
     -- Run command test on client
     threadDelay 5000000
-    runProcess clientNode (commandTests nodes)
+
+    randomGen <- liftIO createSystemRandom
+    runProcess clientNode (commandTests nodes randomGen)
 
 
     -- Run partition experiments...
