@@ -253,7 +253,6 @@ handleRequestVoteMsg :: ClusterState
                      -> Process ()
 handleRequestVoteMsg c mr msg = do
     (t, g) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    say $ "requestvote, granted: " ++ show g 
     send (rvSender msg) (RequestVoteResponseMsg (raftPid c) t g)
   where
     handleMsg :: ClusterState
@@ -307,6 +306,8 @@ handleAppendEntriesMsg :: ClusterState
                        -> Process ()
 handleAppendEntriesMsg c mr msg = do
     (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    say "Received append entries msg"
+    say $ show t ++ " " ++ show i ++" "++ show g
     send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
     handleMsg :: ClusterState
@@ -320,9 +321,9 @@ handleAppendEntriesMsg c mr msg = do
         | term < rCurrentTerm = return (r, (rCurrentTerm, False, 0))
         | prevLogIndex == 0 || 
             (prevLogIndex <= rLogSize && 
-                logTerm (log r) prevLogIndex == prevLogIndex) = do
+                logTerm (log r) prevLogIndex == prevLogTerm) = do
             let rLog' = appendLog rLog entries prevLogIndex
-                index = IntMap.size rLog'
+                index = prevLogIndex + IntMap.size entries
                 r'    = r { 
                             log         = rLog'
                           , commitIndex = min leaderCommit index
@@ -344,13 +345,15 @@ handleAppendEntriesMsg c mr msg = do
         appendLog dstLog srcLog prevLogIndex
             | IntMap.null srcLog = dstLog
             | logTerm dstLog index /= termReceived headSrcLog = 
-                appendLog (IntMap.insert index headSrcLog dstLog) tailSrcLog index
+                appendLog (IntMap.insert index headSrcLog initDstLog) tailSrcLog index
             | otherwise = appendLog dstLog tailSrcLog index
           where
             index = prevLogIndex + 1
             ((_, headSrcLog), tailSrcLog) = IntMap.deleteFindMin srcLog
-            -- TODO This is currently O(n)
-            initDstLog = IntMap.filterWithKey (\k _ -> k <= index - 1)
+            initDstLog
+                | prevLogIndex < IntMap.size dstLog = 
+                    IntMap.filterWithKey (\k _ -> k <= prevLogIndex) dstLog
+                | otherwise = dstLog
 
 
 -- | Handle Append Entries response from peer.
@@ -387,7 +390,7 @@ handleAppendEntriesResponseMsg c mr msg =
 
 
 -- | Handle command message from a client. If leader, write to log. Else
--- forward to leader. 
+-- forward to leader. If there is no leader...send back to self
 handleCommandMsg :: Serializable a
                  => ClusterState
                  -> MVar (RaftState a)
@@ -396,7 +399,9 @@ handleCommandMsg :: Serializable a
 handleCommandMsg c mr msg = do
     (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
     case leader of
-        Nothing -> return ()
+        Nothing -> if forwardMsg
+            then nsend "client" msg >> return ()
+            else return ()
         Just l  -> if forwardMsg
             then nsendRemote l "client" msg >> return ()
             else return ()
@@ -435,10 +440,12 @@ applyLog c mr = do
                   , log         = IntMap.insert lastApplied' entry' (log r)
                 }, False)
 
+    log <- liftIO $ withMVarMasked mr $ \r -> return $ log r
+
     -- Loop until finish applying all
     if finished
         then return ()
-        else say "applied" >> applyLog c mr
+        else say ("Applied: " ++ show (IntMap.size log)) >> applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -567,7 +574,7 @@ clientThread c mr = do
     link $ mainPid c
    
     (RpcCommandMsg m) <- receiveWait [ match recvCommandMsg ]
-    say $ "Received something"
+
     handleCommandMsg c mr m
 
     -- loop forever
@@ -598,6 +605,9 @@ raftThread c mr = do
       , match recvAppendEntriesResponseMsg
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
+
+    l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
+    say $ show (IntMap.size l)
 
     -- Handle RPC Message
     case msg of
