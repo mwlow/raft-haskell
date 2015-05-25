@@ -12,6 +12,7 @@ import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import qualified Data.Map as Map
+import qualified Data.IntMap as IntMap
 
 import Data.List
 import Data.Function
@@ -84,8 +85,39 @@ commandTests backend nodes processes = do
         -- Loop forever
         loop m' randomGen testNode
 
+-- | This thread starts a new election.
+sendCommandThread :: NodeId -> String -> Process ()
+sendCommandThread nodeID command = do
+    nsendRemote nodeID "client" (Command $ show command)
+
 commandLoop :: Backend -> [LocalNode] -> [ProcessId] -> IO ()
 commandLoop backend nodes processes = do
+    -- Initialize state
+    testNode <- newLocalNode backend
+    randomGen <- liftIO createSystemRandom
+    let z = zip [0,1..] (zip3 (localNodeId <$> nodes) nodes processes)
+        m = IntMap.fromList z
+
+
+    input <- getLine
+    let 
+        args = words input
+        command = args !! 0
+        argument = args !! 1
+    case command of
+        _ -> do
+            let 
+                nodeID = read command
+                x = IntMap.lookup nodeID m
+            case x of
+                Just (nodeID, node, process) -> do 
+                    forkProcess node (sendCommandThread nodeID command)
+                    return ()
+                Nothing -> return ()
+            
+        
+
+
 
 -- | Handle Control C.
 cntrlc :: ThreadId -> [LocalNode] -> IO ()
@@ -137,7 +169,7 @@ initCluster host port numNodes = do
     --forkProcess (nodes !! 0) $ initRaft backend nodes
     commandTests backend nodes processes
     
-    commandLoop
+    commandLoop backend nodes processes
     -- Run until receive 'q' or Control C
     whileM_ (liftM ('q' /=) getChar) $
         installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
