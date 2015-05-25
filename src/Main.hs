@@ -60,7 +60,8 @@ commandTests backend nodes processes = do
         mapM_ (\(_, (_, pid)) -> color Yellow (print pid)) dead
 
         -- Stop them
-        forkProcess testNode $ mapM_ ((`exit` "") . snd . snd) dead 
+        forkProcess testNode $ mapM_ (\(n, (_, _)) -> 
+            nsendRemote n "state" False) dead 
         threadDelay 1000000
 
         -- Send some messages
@@ -71,16 +72,18 @@ commandTests backend nodes processes = do
         threadDelay 1000000
         
         -- Restart them
-        l <- mapM (\(k, (n, _)) -> do
-                p <- forkProcess n $ initRaft backend nodes
-                return (k, (n, p))) dead
+        --l <- mapM (\(k, (n, _)) -> do
+        --        p <- forkProcess n $ initRaft backend nodes
+        --        return (k, (n, p))) dead
+        forkProcess testNode $ mapM_ (\(n, (_, _)) -> 
+            nsendRemote n "state" True) dead 
         threadDelay 1000000
 
         -- Update map
-        let m' = Map.union (Map.fromList l) m
+        --let m' = Map.union (Map.fromList l) m
 
         -- Loop forever
-        loop m' randomGen testNode
+        loop m randomGen testNode
 
 
 -- | Handle Control C.

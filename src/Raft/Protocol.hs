@@ -1,5 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
+--TODO: Store state in MVar Raftstate and check this state
+--in raftthread. Loop if False, else continue.
 
 module Raft.Protocol 
 ( initRaft
@@ -124,6 +126,7 @@ data RpcMessage a
     | RpcRequestVoteMsg RequestVoteMsg
     | RpcRequestVoteResponseMsg RequestVoteResponseMsg
     | RpcCommandMsg (Command a)
+    | RpcStateMsg Bool
 
 -- | These wrapping functions return the message in an RPCMsg type.
 recvSay :: String -> Process (RpcMessage a)
@@ -155,6 +158,9 @@ recvRequestVoteResponseMsg a = return $ RpcRequestVoteResponseMsg a
 recvCommandMsg :: Command a -> Process (RpcMessage a)
 recvCommandMsg a = return $ RpcCommandMsg a
 
+recvStateMsg :: Bool -> Process (RpcMessage a)
+recvStateMsg a = return $ RpcStateMsg a
+
 
 -- | This is the process's local view of the entire cluster. Information
 -- stored in this data structure should only be modified by the main thread.
@@ -166,6 +172,7 @@ data ClusterState = ClusterState
     , peers       :: [NodeId]      -- ^ nodeIds \\ [selfNodeId]
     , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
     , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
+    , clientPid   :: ProcessId     -- ^ ProcessId of the state thread
     , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
     , randomGen   :: GenIO         -- ^ Random generator for random events
     }
@@ -183,6 +190,7 @@ newCluster backend nodes = do
       , peers      = (localNodeId <$> nodes) \\ [processNodeId selfPid]
       , mainPid    = selfPid
       , raftPid    = nullProcessId (processNodeId selfPid)
+      , clientPid  = nullProcessId (processNodeId selfPid)
       , delayPid   = nullProcessId (processNodeId selfPid)
       , randomGen  = randomGen
     }
@@ -202,6 +210,7 @@ data RaftState a = RaftState
     , matchIndexMap   :: Map.Map NodeId Index  -- ^ Highest entry replicated
 
     , voteCount       :: Int                   -- ^ Number votes received
+    , active          :: Bool                  -- ^ Is Raft active on this node?
     }
 
 -- | Creates a new RaftState.
@@ -217,6 +226,7 @@ newRaftState nodes = RaftState {
       , nextIndexMap  = Map.fromList $ zip (localNodeId <$> nodes) [1, 1..]
       , matchIndexMap = Map.fromList $ zip (localNodeId <$> nodes) [0, 0..]
       , voteCount     = 0
+      , active        = True
     }
 
 -- | Helper Functions
@@ -490,6 +500,11 @@ leaderThread c mr u = do
     -- Die when parent does
     link $ mainPid c
 
+    active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
+    if active
+        then return ()
+        else (liftIO $ threadDelay 50000) >> leaderThread c mr u
+
     -- Delay u ns to main update rate
     liftIO $ threadDelay u
 
@@ -562,12 +577,59 @@ clientThread c mr = do
     -- loop forever
     clientThread c mr
 
+-- | This thread listens from the main program and halts and continues
+-- the node (in order to test Raft).
+stateThread :: ClusterState -> MVar (RaftState a) -> Process ()
+stateThread c mr = do
+    msg <- receiveWait [ match recvStateMsg ]
+
+    case msg of 
+        RpcStateMsg True -> do
+            -- Enable RaftThread
+            liftIO $ modifyMVarMasked_ mr $ \r -> return r { active = True }
+
+            -- Get registry values of server and client
+            raftReg   <- whereis "server"
+            clientReg <- whereis "client"
+
+            -- register them
+            case raftReg of
+                Nothing -> register "server" $ raftPid c
+                _       -> reregister "server" $ raftPid c
+            case clientReg of
+                Nothing -> register "client" $ clientPid c
+                _       -> reregister "client" $ clientPid c
+
+        RpcStateMsg False -> do
+            -- Disable RaftThread
+            liftIO $ modifyMVarMasked_ mr $ \r -> return r { active = False }
+
+            -- Get registry values of server and client
+            raftReg   <- whereis "server"
+            clientReg <- whereis "client"
+
+            -- Unregister them
+            case raftReg of
+                Nothing -> return ()
+                _       -> unregister "server"
+            case clientReg of
+                Nothing -> return ()
+                _       -> unregister "client" 
+
+    -- Loop forever
+    stateThread c mr
+
 
 -- | Main loop of the program.
 raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
     -- Die when parent does
     link $ mainPid c
+
+    active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
+    if active
+        then return ()
+        else (liftIO $ threadDelay 50000) >> raftThread c mr
    
    -- Choose election timeout between 150ms and 600ms
     timeout <- liftIO (uniformR (150000, 2*300000) (randomGen c) :: IO Int)
@@ -621,6 +683,7 @@ raftThread c mr = do
     raftThread c'' mr
 
 
+
 initRaft :: Backend -> [LocalNode] -> Process ()
 initRaft backend nodes = do
 
@@ -629,7 +692,7 @@ initRaft backend nodes = do
     mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
 
     -- Start process for handling messages and register it
-    raftPid <- spawnLocal (raftThread c mr)
+    raftPid <- spawnLocal $ raftThread c mr
     raftReg <- whereis "server"
     case raftReg of
         Nothing -> register "server" raftPid
@@ -639,19 +702,29 @@ initRaft backend nodes = do
     let c' = c { raftPid = raftPid }
 
     -- Start leader thread
-    leaderPid <- spawnLocal (leaderThread c' mr 75000)
+    leaderPid <- spawnLocal $ leaderThread c' mr 75000
 
     -- Start client thread and register it
-    clientPid <- spawnLocal (clientThread c' mr)
+    clientPid <- spawnLocal $ clientThread c' mr
     clientReg <- whereis "client"
     case clientReg of
         Nothing -> register "client" clientPid
         _       -> reregister "client" clientPid
 
+    let c'' = c' { clientPid = clientPid }
+
+    -- Start state thread and register it
+    statePid <- spawnLocal $ stateThread c'' mr
+    stateReg <- whereis "state"
+    case stateReg of
+        Nothing -> register "state" statePid
+        _       -> reregister "state" statePid
+
     -- Kill this process if raftThread dies
     link raftPid
     link leaderPid
     link clientPid
+    link statePid
 
     -- Hack to block
     x <- receiveWait []
