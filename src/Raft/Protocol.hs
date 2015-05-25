@@ -1,13 +1,6 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
---Notes: use txt file as state-machine? Therefore we can write a second program
---to visualize the log files/txt files in real time.
---Handle rewriting pids to registry (especially when first starting up)
--- start process to handle messages from outside world.
--- Use forward to forward all messages to the leader.
 
---TODO: It looks like we have to spawn a new thread to handle votes,
--- i.e. voteserver
 module Raft.Protocol 
 ( initRaft
 , Command(..)
@@ -56,7 +49,7 @@ instance (Binary a) => Binary (Command a) where
     put (Command a) = put a
     get = Command <$> get
 
--- | An entry in a log, clearly. Also serializable.
+-- | An entry in a log. Also serializable.
 data LogEntry a = LogEntry 
     { termReceived   :: Term
     , applied        :: Bool
@@ -166,14 +159,11 @@ recvCommandMsg a = return $ RpcCommandMsg a
 -- | This is the process's local view of the entire cluster. Information
 -- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
-    { backend     :: Backend                  -- ^ Backend for the topology
-    , numNodes    :: Int
-    , selfNodeId  :: NodeId                   -- ^ nodeId of current server
-    , nodeIds     :: [NodeId]                 -- ^ List of nodeIds in the topology
-    , peers       :: [NodeId]                 -- ^ nodeIds \\ [selfNodeId]
---    , knownIds    :: Map.Map NodeId ProcessId -- ^ Map of known processIds
---    , unknownIds  :: Map.Map NodeId ProcessId -- ^ Map of unknown processIds
-
+    { backend     :: Backend       -- ^ Backend for the topology
+    , numNodes    :: Int           -- ^ Number of nodes in the topology
+    , selfNodeId  :: NodeId        -- ^ nodeId of current server
+    , nodeIds     :: [NodeId]      -- ^ List of nodeIds in the topology
+    , peers       :: [NodeId]      -- ^ nodeIds \\ [selfNodeId]
     , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
     , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
     , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
@@ -185,7 +175,6 @@ newCluster :: Backend -> [LocalNode] -> Process (ClusterState)
 newCluster backend nodes = do 
     selfPid   <- getSelfPid
     randomGen <- liftIO createSystemRandom
-    
     return ClusterState {
         backend    = backend
       , numNodes   = length nodes
@@ -201,18 +190,18 @@ newCluster backend nodes = do
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader          :: Maybe NodeId               
-    , state           :: ServerRole
-    , currentTerm     :: Term
-    , votedFor        :: Maybe NodeId
-    , log             :: Log a
-    , commitIndex     :: Index
-    , lastApplied     :: Index
+    { leader          :: Maybe NodeId          -- ^ Current leader of Raft   
+    , state           :: ServerRole            -- ^ Follower, Candidate, Leader
+    , currentTerm     :: Term                  -- ^ Current election term
+    , votedFor        :: Maybe NodeId          -- ^ Voted node for leader
+    , log             :: Log a                 -- ^ Contains log entries
+    , commitIndex     :: Index                 -- ^ Highest entry committed
+    , lastApplied     :: Index                 -- ^ Highest entry applied
 
-    , nextIndexMap    :: Map.Map NodeId Index --TODO: Should this include self?
-    , matchIndexMap   :: Map.Map NodeId Index --TODO: Should this include self?
+    , nextIndexMap    :: Map.Map NodeId Index  -- ^ Next entry to send
+    , matchIndexMap   :: Map.Map NodeId Index  -- ^ Highest entry replicated
 
-    , voteCount       :: Int
+    , voteCount       :: Int                   -- ^ Number votes received
     }
 
 -- | Creates a new RaftState.
@@ -306,7 +295,6 @@ handleAppendEntriesMsg :: ClusterState
                        -> Process ()
 handleAppendEntriesMsg c mr msg = do
     (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    --say $ show t ++ " " ++ show g ++ " " ++ show i
     send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
     handleMsg :: ClusterState
@@ -377,8 +365,6 @@ handleAppendEntriesResponseMsg c mr msg =
                   , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
                 } 
                 else return r {
-                    -- added to deal with restart from scratch
-                    -- matchIndexMap = Map.insert peer (max 0 $ rMatchIndex - 1) rMatchIndexMap,
                     nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
                 }
         | otherwise = return r
@@ -389,7 +375,6 @@ handleAppendEntriesResponseMsg c mr msg =
         rMatchIndexMap = matchIndexMap r
         rNextIndexMap  = nextIndexMap r
         rNextIndex     = rNextIndexMap Map.! peer
-        --rMatchIndex    = rMatchIndexMap Map.! peer
 
 -- | Handle command message from a client. If leader, write to log. Else
 -- forward to leader. If there is no leader...send back to self
@@ -422,6 +407,7 @@ handleCommandMsg c mr msg = do
                 , command      = msg
                 }
             return ( r { log = IntMap.insert key entry (log r) }, (False, leader r))
+
 
 -- | Applies entries in the log to state machine.
 applyLog :: ClusterState -> MVar (RaftState a) -> Process ()
@@ -498,8 +484,6 @@ delayThread c mr t = do
 
 
 -- | This thread only performs work when the server is the leader.
--- TODO: How does this thread affect election timeout?
--- TODO: How does leader deal with election timeout?
 leaderThread :: (Show a, Serializable a) 
              => ClusterState -> MVar (RaftState a) -> Int -> Process ()
 leaderThread c mr u = do
@@ -515,9 +499,7 @@ leaderThread c mr u = do
     -- Send them if they were created
     case msgsM of
         Nothing   -> return ()
-        Just msgs -> do
-            mapM_ (\(n, m) -> say $ show n ++ ": " ++ show m) msgs
-            mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
+        Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
 
     -- Advance commit index
     liftIO $ modifyMVarMasked_ mr $ \r -> do
@@ -605,9 +587,6 @@ raftThread c mr = do
       , match recvAppendEntriesResponseMsg
       , match recvRequestVoteMsg
       , match recvRequestVoteResponseMsg ]
-
-    l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
-    say $ show (IntMap.size l)
 
     -- Handle RPC Message
     case msg of
