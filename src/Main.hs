@@ -130,8 +130,8 @@ cntrlc tid nodes = do
 initCluster :: String -> String -> Int -> IO ()
 initCluster host port numNodes = do
     -- Initialize backend and then start all the nodes
-    color Cyan $ printf "To kill a node, enter node number"
-    color Cyan $ printf "Enter node number followed by a space, and then your command"
+    color Cyan $ printf "To kill a node, enter node number\n"
+    color Cyan $ printf "Enter node number followed by a space, and then your command\n"
     color Cyan $ printf "%s %d %s\n" "==> Starting up" numNodes "nodes"
     backend <- initializeBackend host port initRemoteTable
     nodes <- replicateM numNodes $ newLocalNode backend
