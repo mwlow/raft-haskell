@@ -53,9 +53,9 @@ instance (Binary a) => Binary (Command a) where
 
 -- | An entry in a log. Also serializable.
 data LogEntry a = LogEntry 
-    { termReceived   :: Term
-    , applied        :: Bool
-    , command        :: Command a
+    { termReceived   :: !Term
+    , applied        :: !Bool
+    , command        :: !(Command a)
     } deriving (Show, Read, Eq, Typeable)
 
 instance (Binary a) => Binary (LogEntry a) where
@@ -64,13 +64,13 @@ instance (Binary a) => Binary (LogEntry a) where
 
 -- | Data structure for appendEntriesRPC. Is serializable.
 data AppendEntriesMsg a = AppendEntriesMsg 
-    { aeSender       :: ProcessId -- ^ Sender's process id
-    , aeTerm         :: Term      -- ^ Leader's term
-    , leaderId       :: NodeId    -- ^ Leader's Id
-    , prevLogIndex   :: Index     -- ^ Log entry index right before new ones
-    , prevLogTerm    :: Term      -- ^ Term of the previous log entry
-    , entries        :: Log a     -- ^ Log entries to store, [] for heartbeat
-    , leaderCommit   :: Index     -- ^ Leader's commit index
+    { aeSender       :: !ProcessId -- ^ Sender's process id
+    , aeTerm         :: !Term      -- ^ Leader's term
+    , leaderId       :: !NodeId    -- ^ Leader's Id
+    , prevLogIndex   :: !Index     -- ^ Log entry index right before new ones
+    , prevLogTerm    :: !Term      -- ^ Term of the previous log entry
+    , entries        :: !(Log a)   -- ^ Log entries to store, [] for heartbeat
+    , leaderCommit   :: !Index     -- ^ Leader's commit index
     } deriving (Show, Eq, Typeable)
 
 instance (Binary a) => Binary (AppendEntriesMsg a) where
@@ -80,10 +80,10 @@ instance (Binary a) => Binary (AppendEntriesMsg a) where
 
 -- | Data structure for the response to appendEntriesRPC. Is serializable.
 data AppendEntriesResponseMsg = AppendEntriesResponseMsg 
-    { aerSender     :: ProcessId  -- ^ Sender's process id
-    , aerTerm       :: Term       -- ^ Current term to update leader
-    , aerMatchIndex :: Index      -- ^ Index of highest log entry replicated
-    , success       :: Bool       -- ^ Did follower contain a matching entry?
+    { aerSender     :: !ProcessId  -- ^ Sender's process id
+    , aerTerm       :: !Term       -- ^ Current term to update leader
+    , aerMatchIndex :: !Index      -- ^ Index of highest log entry replicated
+    , success       :: !Bool       -- ^ Did follower contain a matching entry?
     } deriving (Show, Eq, Typeable)
 
 instance Binary AppendEntriesResponseMsg where
@@ -92,11 +92,11 @@ instance Binary AppendEntriesResponseMsg where
 
 -- | Data structure for requestVoteRPC. Is serializable.
 data RequestVoteMsg = RequestVoteMsg
-    { rvSender      :: ProcessId   -- ^ Sender's process id
-    , rvTerm        :: Term        -- ^ Candidate's term
-    , candidateId   :: NodeId      -- ^ Candidate requesting vote
-    , lastLogIndex  :: Index       -- ^ Index of candidate's last log entry
-    , lastLogTerm   :: Term        -- ^ Term of candidate's last log entry
+    { rvSender      :: !ProcessId   -- ^ Sender's process id
+    , rvTerm        :: !Term        -- ^ Candidate's term
+    , candidateId   :: !NodeId      -- ^ Candidate requesting vote
+    , lastLogIndex  :: !Index       -- ^ Index of candidate's last log entry
+    , lastLogTerm   :: !Term        -- ^ Term of candidate's last log entry
     } deriving (Show, Eq, Typeable)
 
 instance Binary RequestVoteMsg where
@@ -106,9 +106,9 @@ instance Binary RequestVoteMsg where
 
 -- | Data structure for the response to requestVoteRPC. Is serializable.
 data RequestVoteResponseMsg = RequestVoteResponseMsg
-    { rvrSender     :: ProcessId  -- ^ Sender's process id
-    , rvrTerm       :: Term       -- ^ Current term to update leader
-    , voteGranted   :: Bool       -- ^ Did candidate receive vote?
+    { rvrSender     :: !ProcessId  -- ^ Sender's process id
+    , rvrTerm       :: !Term       -- ^ Current term to update leader
+    , voteGranted   :: !Bool       -- ^ Did candidate receive vote?
     } deriving (Show, Eq, Typeable)
 
 instance Binary RequestVoteResponseMsg where
@@ -165,16 +165,16 @@ recvStateMsg a = return $ RpcStateMsg a
 -- | This is the process's local view of the entire cluster. Information
 -- stored in this data structure should only be modified by the main thread.
 data ClusterState = ClusterState 
-    { backend     :: Backend       -- ^ Backend for the topology
-    , numNodes    :: Int           -- ^ Number of nodes in the topology
-    , selfNodeId  :: NodeId        -- ^ nodeId of current server
-    , nodeIds     :: [NodeId]      -- ^ List of nodeIds in the topology
-    , peers       :: [NodeId]      -- ^ nodeIds \\ [selfNodeId]
-    , mainPid     :: ProcessId     -- ^ ProcessId of the master thread
-    , raftPid     :: ProcessId     -- ^ ProcessId of the thread running Raft
-    , clientPid   :: ProcessId     -- ^ ProcessId of the state thread
-    , delayPid    :: ProcessId     -- ^ ProcessId of the delay thread
-    , randomGen   :: GenIO         -- ^ Random generator for random events
+    { backend     :: !Backend       -- ^ Backend for the topology
+    , numNodes    :: !Int           -- ^ Number of nodes in the topology
+    , selfNodeId  :: !NodeId        -- ^ nodeId of current server
+    , nodeIds     :: ![NodeId]      -- ^ List of nodeIds in the topology
+    , peers       :: ![NodeId]      -- ^ nodeIds \\ [selfNodeId]
+    , mainPid     :: !ProcessId     -- ^ ProcessId of the master thread
+    , raftPid     :: !ProcessId     -- ^ ProcessId of the thread running Raft
+    , clientPid   :: !ProcessId     -- ^ ProcessId of the state thread
+    , delayPid    :: !ProcessId     -- ^ ProcessId of the delay thread
+    , randomGen   :: GenIO          -- ^ Random generator for random events
     }
 
 -- | Creates a new cluster.
@@ -198,19 +198,19 @@ newCluster backend nodes = do
 -- | This is state that is volatile and can be modified by multiple threads
 -- concurrently. This state will always be passed to the threads in an MVar.
 data RaftState a = RaftState
-    { leader          :: Maybe NodeId          -- ^ Current leader of Raft   
-    , state           :: ServerRole            -- ^ Follower, Candidate, Leader
-    , currentTerm     :: Term                  -- ^ Current election term
-    , votedFor        :: Maybe NodeId          -- ^ Voted node for leader
-    , log             :: Log a                 -- ^ Contains log entries
-    , commitIndex     :: Index                 -- ^ Highest entry committed
-    , lastApplied     :: Index                 -- ^ Highest entry applied
+    { leader          :: !(Maybe NodeId)       -- ^ Current leader of Raft   
+    , state           :: !ServerRole           -- ^ Follower, Candidate, Leader
+    , currentTerm     :: !Term                 -- ^ Current election term
+    , votedFor        :: !(Maybe NodeId)       -- ^ Voted node for leader
+    , log             :: !(Log a)              -- ^ Contains log entries
+    , commitIndex     :: !Index                -- ^ Highest entry committed
+    , lastApplied     :: !Index                -- ^ Highest entry applied
 
     , nextIndexMap    :: Map.Map NodeId Index  -- ^ Next entry to send
     , matchIndexMap   :: Map.Map NodeId Index  -- ^ Highest entry replicated
 
-    , voteCount       :: Int                   -- ^ Number votes received
-    , active          :: Bool                  -- ^ Is Raft active on this node?
+    , voteCount       :: !Int                  -- ^ Number votes received
+    , active          :: !Bool                 -- ^ Is Raft active on this node?
     }
 
 -- | Creates a new RaftState.
@@ -503,7 +503,7 @@ leaderThread c mr u = do
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
     if active
         then return ()
-        else (liftIO $ threadDelay 50000) >> leaderThread c mr u
+        else (liftIO $ threadDelay 10000) >> leaderThread c mr u
 
     -- Delay u ns to main update rate
     liftIO $ threadDelay u
@@ -629,10 +629,10 @@ raftThread c mr = do
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
     if active
         then return ()
-        else (liftIO $ threadDelay 50000) >> raftThread c mr
+        else (liftIO $ threadDelay 10000) >> raftThread c mr
    
    -- Choose election timeout between 150ms and 600ms
-    timeout <- liftIO (uniformR (150000, 2*300000) (randomGen c) :: IO Int)
+    timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
 
     -- Update cluster with raftPid
     selfPid <- getSelfPid
