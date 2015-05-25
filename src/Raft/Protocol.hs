@@ -306,6 +306,7 @@ handleAppendEntriesMsg :: ClusterState
                        -> Process ()
 handleAppendEntriesMsg c mr msg = do
     (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
+    --say $ show t ++ " " ++ show g ++ " " ++ show i
     send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
     handleMsg :: ClusterState
@@ -376,6 +377,8 @@ handleAppendEntriesResponseMsg c mr msg =
                   , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
                 } 
                 else return r {
+                    -- added to deal with restart from scratch
+                    -- matchIndexMap = Map.insert peer (max 0 $ rMatchIndex - 1) rMatchIndexMap,
                     nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
                 }
         | otherwise = return r
@@ -386,6 +389,7 @@ handleAppendEntriesResponseMsg c mr msg =
         rMatchIndexMap = matchIndexMap r
         rNextIndexMap  = nextIndexMap r
         rNextIndex     = rNextIndexMap Map.! peer
+        --rMatchIndex    = rMatchIndexMap Map.! peer
 
 -- | Handle command message from a client. If leader, write to log. Else
 -- forward to leader. If there is no leader...send back to self
@@ -496,7 +500,7 @@ delayThread c mr t = do
 -- | This thread only performs work when the server is the leader.
 -- TODO: How does this thread affect election timeout?
 -- TODO: How does leader deal with election timeout?
-leaderThread :: (Serializable a) 
+leaderThread :: (Show a, Serializable a) 
              => ClusterState -> MVar (RaftState a) -> Int -> Process ()
 leaderThread c mr u = do
     -- Die when parent does
@@ -511,7 +515,9 @@ leaderThread c mr u = do
     -- Send them if they were created
     case msgsM of
         Nothing   -> return ()
-        Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
+        Just msgs -> do
+            mapM_ (\(n, m) -> say $ show n ++ ": " ++ show m) msgs
+            mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
 
     -- Advance commit index
     liftIO $ modifyMVarMasked_ mr $ \r -> do
@@ -555,7 +561,7 @@ leaderThread c mr u = do
                     r'' = r' { 
                         nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
                     }
-                in (r'', Just $ (n, msg):a)
+                in (r', Just $ (n, msg):a)
             ) (r, Just []) (peers c)
         | otherwise = return (r, Nothing)
 

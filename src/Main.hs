@@ -61,20 +61,20 @@ commandTests backend nodes processes = do
 
         -- Stop them
         forkProcess testNode $ mapM_ ((`exit` "") . snd . snd) dead 
-        threadDelay 5000000
+        threadDelay 1000000
 
         -- Send some messages
-        t <- (uniformR (1, 1) (randomGen) :: IO Int)
+        t <- (uniformR (1, 5) (randomGen) :: IO Int)
         forkProcess testNode $ forM_ [1..t] $ \i -> do
             r <- liftIO r'
             nsendRemote (fst $ Map.elemAt r live) "client" (Command $ show i)
-        threadDelay 5000000
+        threadDelay 1000000
         
         -- Restart them
         l <- mapM (\(k, (n, _)) -> do
                 p <- forkProcess n $ initRaft backend nodes
                 return (k, (n, p))) dead
-        threadDelay 5000000
+        threadDelay 1000000
 
         -- Update map
         let m' = Map.union (Map.fromList l) m
