@@ -17,8 +17,7 @@ import System.Exit
 import System.Posix.Signals
 import Control.Concurrent
 import Control.Concurrent.MVar
-import Control.Monad
-import Control.Monad.Trans
+import Control.Monad hiding (forM_)
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Extras (isProcessAlive)
@@ -30,10 +29,10 @@ import Text.Printf
 import Data.Binary
 import Data.Typeable
 import Data.List
+import Data.Foldable (forM_)
 import Safe
-import qualified Data.Set as Set
-import qualified Data.IntMap as IntMap
-import qualified Data.Map as Map
+import qualified Data.IntMap.Strict as IntMap
+import qualified Data.Map.Strict as Map
 import GHC.Generics (Generic)
 
 -- | Type renaming to make things clearer.
@@ -178,7 +177,7 @@ data ClusterState = ClusterState
     }
 
 -- | Creates a new cluster.
-newCluster :: Backend -> [LocalNode] -> Process (ClusterState)
+newCluster :: Backend -> [LocalNode] -> Process ClusterState
 newCluster backend nodes = do 
     selfPid   <- getSelfPid
     randomGen <- liftIO createSystemRandom
@@ -326,7 +325,7 @@ handleAppendEntriesMsg c mr msg = do
                           , commitIndex = min leaderCommit index
                           , leader      = Just $ processNodeId sender
                           , state       = Follower
-                }
+                          }
             return (r', (rCurrentTerm, True, index))
         | otherwise = return (r { 
                         leader = Just $ processNodeId sender
@@ -373,10 +372,10 @@ handleAppendEntriesResponseMsg c mr msg =
                 then return r { 
                     matchIndexMap = Map.insert peer matchIndex rMatchIndexMap
                   , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
-                } 
+                  } 
                 else return r {
                     nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
-                }
+                  }
         | otherwise = return r
       where
         peer           = processNodeId sender
@@ -396,12 +395,8 @@ handleCommandMsg :: Serializable a
 handleCommandMsg c mr msg = do
     (forwardMsg, leader) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
     case leader of
-        Nothing -> if forwardMsg
-            then nsend "client" msg >> return ()
-            else return ()
-        Just l  -> if forwardMsg
-            then nsendRemote l "client" msg >> return ()
-            else return ()
+        Nothing -> when forwardMsg $ void (nsend "client" msg)
+        Just l  -> when forwardMsg $ void (nsendRemote l "client" msg)
   where
     handleMsg :: ClusterState 
               -> RaftState a 
@@ -422,17 +417,17 @@ handleCommandMsg c mr msg = do
 -- | Applies entries in the log to state machine.
 applyLog :: ClusterState -> MVar (RaftState a) -> Process ()
 applyLog c mr = do
-    finished <- liftIO $ modifyMVarMasked mr $ \r -> do
+    finished <- liftIO $ modifyMVarMasked mr $ \r ->
         if lastApplied r >= commitIndex r 
             then return (r, True)
             else 
                 let lastApplied' = succ . lastApplied $ r
-                    entry        = (log r) IntMap.! lastApplied'
+                    entry        = log r IntMap.! lastApplied'
                     entry'       = entry { applied = True }
                 in return (r {
                     lastApplied = lastApplied'
                   , log         = IntMap.insert lastApplied' entry' (log r)
-                }, False)
+                  }, False)
 
     log <- liftIO $ withMVarMasked mr $ \r -> return $ log r
 
@@ -449,7 +444,7 @@ electionThread c mr = do
     link $ mainPid c
 
     -- Update raftState and create (Maybe RequestVoteMsg)
-    msg <- liftIO $ modifyMVarMasked mr $ \r -> do
+    msg <- liftIO $ modifyMVarMasked mr $ \r ->
         if state r == Leader
             then return (r, Nothing)
             else 
@@ -501,9 +496,7 @@ leaderThread c mr u = do
     link $ mainPid c
 
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
-    if active
-        then return ()
-        else (liftIO $ threadDelay 10000) >> leaderThread c mr u
+    unless active $ liftIO (threadDelay 10000) >> leaderThread c mr u
 
     -- Delay u ns to main update rate
     liftIO $ threadDelay u
@@ -512,9 +505,7 @@ leaderThread c mr u = do
     msgsM <- liftIO $ modifyMVarMasked mr $ \r -> handleLeader c r
 
     -- Send them if they were created
-    case msgsM of
-        Nothing   -> return ()
-        Just msgs -> mapM_ (\(n, m) -> nsendRemote n "server" m) msgs
+    forM_ msgsM (mapM_ (\ (n, m) -> nsendRemote n "server" m))
 
     -- Advance commit index
     liftIO $ modifyMVarMasked_ mr $ \r -> do
@@ -554,10 +545,10 @@ leaderThread c mr u = do
                       , prevLogTerm  = logTerm r'Log $ r'NextIndex - 1
                       , entries      = IntMap.filterWithKey (\k _ -> k >= r'NextIndex) r'Log 
                       , leaderCommit = commitIndex r'
-                    }
+                      }
                     r'' = r' { 
                         nextIndexMap = Map.insert n r'LastIndex r'NextIndexMap
-                    }
+                      }
                 in (r', Just $ (n, msg):a)
             ) (r, Just []) (peers c)
         | otherwise = return (r, Nothing)
@@ -627,9 +618,7 @@ raftThread c mr = do
     link $ mainPid c
 
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
-    if active
-        then return ()
-        else (liftIO $ threadDelay 10000) >> raftThread c mr
+    unless active $ liftIO (threadDelay 10000) >> raftThread c mr
    
    -- Choose election timeout between 150ms and 600ms
     timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
@@ -659,7 +648,7 @@ raftThread c mr = do
         other@_ -> return ()
 
     -- Update if become leader
-    s <- liftIO $ modifyMVarMasked mr $ \r -> do
+    s <- liftIO $ modifyMVarMasked mr $ \r ->
         case state r of
             Candidate -> if voteCount r > numNodes c'' `div` 2
                 then return (r {
@@ -672,9 +661,7 @@ raftThread c mr = do
             other@_   -> return (r, False)
 
     t <- liftIO $ withMVarMasked mr $ \r -> return $ currentTerm r
-    if s
-        then say $ "I am leader of term: " ++ show t
-        else return ()
+    when s $ say $ "I am leader of term: " ++ show t
     
     -- Advance state machine
     applyLog c'' mr

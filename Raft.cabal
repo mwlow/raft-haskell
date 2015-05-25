@@ -27,4 +27,5 @@ executable Raft
                        mwc-random, distributed-process-extras,
                        safe, mtl
   hs-source-dirs:      src
+  ghc-options:         -O2
   default-language:    Haskell2010
