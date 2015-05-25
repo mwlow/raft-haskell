@@ -429,12 +429,8 @@ applyLog c mr = do
                   , log         = IntMap.insert lastApplied' entry' (log r)
                   }, False)
 
-    log <- liftIO $ withMVarMasked mr $ \r -> return $ log r
-
     -- Loop until finish applying all
-    if finished
-        then return ()
-        else say ("Applied: " ++ show (IntMap.size log)) >> applyLog c mr
+    unless finished $ applyLog c mr
 
 
 -- | This thread starts a new election.
@@ -496,7 +492,7 @@ leaderThread c mr u = do
     link $ mainPid c
 
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
-    unless active $ liftIO (threadDelay 10000) >> leaderThread c mr u
+    unless active (liftIO (threadDelay 10000) >> leaderThread c mr u)
 
     -- Delay u ns to main update rate
     liftIO $ threadDelay u
@@ -618,7 +614,7 @@ raftThread c mr = do
     link $ mainPid c
 
     active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
-    unless active $ liftIO (threadDelay 10000) >> raftThread c mr
+    unless active (liftIO (threadDelay 10000) >> raftThread c mr)
    
    -- Choose election timeout between 150ms and 600ms
     timeout <- liftIO (uniformR (150000, 300000) (randomGen c) :: IO Int)
@@ -689,7 +685,7 @@ initRaft backend nodes = do
     let c' = c { raftPid = raftPid }
 
     -- Start leader thread
-    leaderPid <- spawnLocal $ leaderThread c' mr 75000
+    leaderPid <- spawnLocal $ leaderThread c' mr 50000
 
     -- Start client thread and register it
     clientPid <- spawnLocal $ clientThread c' mr
