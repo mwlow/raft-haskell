@@ -1,8 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
---TODO: Store state in MVar Raftstate and check this state
---in raftthread. Loop if False, else continue.
-
 module Raft.Protocol 
 ( initRaft
 , Command(..)
@@ -431,7 +428,8 @@ applyLog c mr = do
                     entry        = log r IntMap.! lastApplied'
                     entry'       = entry { applied = True }
                     fname        = "tmp/" ++ show (identifier c) ++ ".csv"
-                    line         = show (termReceived entry) ++ "," ++ show (command entry)
+                    Command cm   = command entry
+                    line         = show (termReceived entry) ++ "," ++ show cm
                 in do
                     withFile fname AppendMode $ \h -> do
                         hPutStrLn h line >> hFlush h
@@ -492,10 +490,10 @@ delayThread c mr t = do
     -- Delay for t ns
     liftIO $ threadDelay t
 
-    -- Spawn thread that starts election
-    spawnLocal $ electionThread c mr
 
-    return ()
+    -- Spawn thread that starts election
+    active <- liftIO $ withMVarMasked mr $ \r-> return $ active r
+    when active $ spawnLocal (electionThread c mr) >> return ()
 
 
 -- | This thread only performs work when the server is the leader.
@@ -523,7 +521,7 @@ leaderThread c mr u = do
         let n = filter (\v -> logTerm (log r) v == currentTerm r)
                         [commitIndex r + 1 .. IntMap.size $ log r]
             pred :: Index -> Bool
-            pred v = numNodes c `div` 2 < 
+            pred v = numNodes c `div` 2 <
                         Map.size (Map.filter (>=v) $ matchIndexMap r) + 1
             ns = filter pred n
 
@@ -684,7 +682,7 @@ raftThread c mr = do
 
 initRaft :: Backend -> [LocalNode] -> Int -> Process ()
 initRaft backend nodes identifier = do
-
+    say "Hi!"
     -- Initialize state
     c <- newCluster backend nodes identifier
     mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
