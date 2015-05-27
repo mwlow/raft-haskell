@@ -306,8 +306,8 @@ handleAppendEntriesMsg :: ClusterState
                        -> Process ()
 handleAppendEntriesMsg c mr msg = do
     (t, g, i) <- liftIO $ modifyMVarMasked mr $ \r -> handleMsg c r msg
-    say "Received append entries msg"
-    say $ show t ++ " " ++ show i ++" "++ show g
+    --say "Received append entries msg"
+    --say $ show t ++ " " ++ show i ++" "++ show g
     send (aeSender msg) (AppendEntriesResponseMsg (raftPid c) t i g)
   where
     handleMsg :: ClusterState
@@ -406,8 +406,8 @@ handleCommandMsg c mr msg = do
             then nsendRemote l "client" msg >> return ()
             else return ()
 
-    log <- liftIO $ withMVarMasked mr $ \r -> return (log r)
-    say $ show (IntMap.size log)
+    --log <- liftIO $ withMVarMasked mr $ \r -> return (log r)
+    --say $ show (IntMap.size log)
 
   where
     handleMsg :: ClusterState 
@@ -607,7 +607,7 @@ raftThread c mr = do
       , match recvRequestVoteResponseMsg ]
 
     l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
-    say $ show (IntMap.size l)
+    --say $ show (IntMap.size l)
 
     -- Handle RPC Message
     case msg of
