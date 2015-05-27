@@ -19,17 +19,14 @@ import Control.Concurrent.MVar
 import Control.Monad hiding (forM_)
 import Control.Applicative
 import Control.Distributed.Process
-import Control.Distributed.Process.Extras (isProcessAlive)
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process.Serializable
 import Control.Distributed.Process.Internal.Types
-import Text.Printf
 import Data.Binary
 import Data.Typeable
 import Data.List
 import Data.Foldable (forM_)
-import Safe
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import GHC.Generics (Generic)

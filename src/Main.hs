@@ -1,13 +1,12 @@
 import System.Environment
 import System.IO
 import System.Console.ANSI
-import System.Exit
-import System.Posix.Signals
+--import System.Exit
+--import System.Posix.Signals
 import System.Random.MWC
 import System.Directory
 import Control.Concurrent 
 import Control.Monad 
-import Control.Monad.Loops
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
@@ -17,7 +16,6 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 
 import Data.List
-import Data.Function
 import Text.Read
 import Text.Printf
 

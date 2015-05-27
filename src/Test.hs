@@ -4,10 +4,8 @@ import System.Random.MWC
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Monad
-import Control.Monad.Trans
 import Control.Applicative
 import Control.Distributed.Process
-import Control.Distributed.Process.Extras (isProcessAlive)
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
 import Control.Distributed.Process.Serializable

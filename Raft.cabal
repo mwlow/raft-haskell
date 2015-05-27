@@ -20,12 +20,12 @@ executable Raft
   other-modules:       Raft.Protocol, Test
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8, distributed-process,
-                       binary, network-transport-tcp, containers,
-                       bytestring, async, transformers, time, stm,
+                       binary, containers,
+                       bytestring, async, time,
                        distributed-process-simplelocalnet,
-                       ansi-terminal, unix, monad-loops,
-                       mwc-random, distributed-process-extras,
-                       safe, mtl, directory
+                       ansi-terminal, unix,
+                       mwc-random, 
+                       safe, directory
   hs-source-dirs:      src
   ghc-options:         -O2
   default-language:    Haskell2010
