@@ -15,6 +15,8 @@ import System.Console.ANSI
 import System.Random.MWC
 import System.Exit
 import System.Posix.Signals
+import System.Directory
+import System.IO
 import Control.Concurrent
 import Control.Concurrent.MVar
 import Control.Monad hiding (forM_)
@@ -174,11 +176,12 @@ data ClusterState = ClusterState
     , clientPid   :: !ProcessId     -- ^ ProcessId of the state thread
     , delayPid    :: !ProcessId     -- ^ ProcessId of the delay thread
     , randomGen   :: GenIO          -- ^ Random generator for random events
+    , identifier  :: !Int           -- ^ Identifier
     }
 
 -- | Creates a new cluster.
-newCluster :: Backend -> [LocalNode] -> Process ClusterState
-newCluster backend nodes = do 
+newCluster :: Backend -> [LocalNode] -> Int -> Process ClusterState
+newCluster backend nodes identifier = do 
     selfPid   <- getSelfPid
     randomGen <- liftIO createSystemRandom
     return ClusterState {
@@ -192,6 +195,7 @@ newCluster backend nodes = do
       , clientPid  = nullProcessId (processNodeId selfPid)
       , delayPid   = nullProcessId (processNodeId selfPid)
       , randomGen  = randomGen
+      , identifier = identifier
     }
 
 -- | This is state that is volatile and can be modified by multiple threads
@@ -417,7 +421,7 @@ handleCommandMsg c mr msg = do
 
 
 -- | Applies entries in the log to state machine.
-applyLog :: ClusterState -> MVar (RaftState a) -> Process ()
+applyLog :: Show a => ClusterState -> MVar (RaftState a) -> Process ()
 applyLog c mr = do
     finished <- liftIO $ modifyMVarMasked mr $ \r ->
         if lastApplied r >= commitIndex r 
@@ -426,14 +430,19 @@ applyLog c mr = do
                 let lastApplied' = succ . lastApplied $ r
                     entry        = log r IntMap.! lastApplied'
                     entry'       = entry { applied = True }
-                in return (r {
-                    lastApplied = lastApplied'
-                  , log         = IntMap.insert lastApplied' entry' (log r)
-                  }, False)
+                    fname        = "tmp/" ++ show (identifier c) ++ ".csv"
+                    line         = show (termReceived entry) ++ "," ++ show (command entry)
+                in do
+                    withFile fname AppendMode $ \h -> do
+                        hPutStrLn h line >> hFlush h
+                    return (r {
+                      lastApplied = lastApplied'
+                    ,   log         = IntMap.insert lastApplied' entry' (log r)
+                    }, False)
 
     -- Loop until finish applying all
-    l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
-    say $ show (IntMap.size l)
+    --l <- liftIO $ withMVarMasked mr $ \r -> return $ log r
+    --say $ show (IntMap.size l)
 
     unless finished $ applyLog c mr
 
@@ -515,7 +524,7 @@ leaderThread c mr u = do
                         [commitIndex r + 1 .. IntMap.size $ log r]
             pred :: Index -> Bool
             pred v = numNodes c `div` 2 < 
-                        Map.size (Map.filter (>=v) $ matchIndexMap r)
+                        Map.size (Map.filter (>=v) $ matchIndexMap r) + 1
             ns = filter pred n
 
         if state r == Leader && not (null ns)
@@ -614,7 +623,7 @@ stateThread c mr = do
 
 
 -- | Main loop of the program.
-raftThread :: (Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
+raftThread :: (Show a, Serializable a) => ClusterState -> MVar (RaftState a) -> Process ()
 raftThread c mr = do
     -- Die when parent does
     link $ mainPid c
@@ -673,11 +682,11 @@ raftThread c mr = do
 
 
 
-initRaft :: Backend -> [LocalNode] -> Process ()
-initRaft backend nodes = do
+initRaft :: Backend -> [LocalNode] -> Int -> Process ()
+initRaft backend nodes identifier = do
 
     -- Initialize state
-    c <- newCluster backend nodes
+    c <- newCluster backend nodes identifier
     mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
 
     -- Start process for handling messages and register it

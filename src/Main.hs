@@ -4,6 +4,7 @@ import System.Console.ANSI
 import System.Exit
 import System.Posix.Signals
 import System.Random.MWC
+import System.Directory
 import Control.Concurrent 
 import Control.Monad 
 import Control.Monad.Loops
@@ -11,6 +12,7 @@ import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
 import Control.Distributed.Process.Backend.SimpleLocalnet
+import Data.Time.Clock
 import qualified Data.Map as Map
 import qualified Data.IntMap as IntMap
 
@@ -101,6 +103,9 @@ commandLoop backend nodes processes = do
     let z = zip [0,1..] (zip3 (localNodeId <$> nodes) nodes processes)
         m = IntMap.fromList z
 
+    tid <- myThreadId
+    installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
+
 
     input <- getLine
     print input
@@ -189,7 +194,7 @@ initCluster host port numNodes = do
     -- Run Raft on all of the nodes
     threadDelay 500000
     color Cyan . putStrLn $ "==> Running Raft ('q' to exit)"
-    processes <- mapM (`forkProcess` initRaft backend nodes) nodes
+    processes <- mapM (\(n,i) -> forkProcess n $ initRaft backend nodes i) $ zip nodes [0..]
     threadDelay 500000
 
     -- Run partition experiments...
@@ -207,7 +212,10 @@ initCluster host port numNodes = do
     --forkProcess (nodes !! 0) $ initRaft backend nodes
     --commandTests backend nodes processes
     
+
     commandLoop backend nodes processes
+
+
     -- Run until receive 'q' or Control C
     whileM_ (liftM ('q' /=) getChar) $
         installHandler keyboardSignal (Catch (cntrlc tid nodes)) Nothing
@@ -224,7 +232,14 @@ main = do
     -- hSetBuffering stdout LineBuffering
     -- hSetBuffering stderr LineBuffering
 
+    -- Rename temporary directory if it exists
+    exists <- doesDirectoryExist "tmp"
+    when exists $ do
+        time <- getCurrentTime
+        renameDirectory "tmp" $ "tmp-" ++ show time
 
+    -- Recreate it
+    createDirectory "tmp"
 
     -- Parse command line arguments
     args <- getArgs
