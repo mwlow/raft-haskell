@@ -109,6 +109,35 @@ commandLoop backend nodes processes = do
         command = args !! 0
         argument = args !! 1
     case command of
+        "wake" ->  do
+            let 
+                nodeID = read argument
+                x = IntMap.lookup nodeID m
+            case x of
+                Just (nodeID, node, process) -> do 
+                    print "WAKED NODE"
+                    forkProcess node (nsendRemote nodeID "state" True)
+                    commandLoop backend nodes processes
+                    return ()
+                Nothing -> do 
+                    print "INVALID NODE SPECIFIED"
+                    commandLoop backend nodes processes
+                    return ()
+        "kill" -> do
+            let 
+                nodeID = read argument
+                x = IntMap.lookup nodeID m
+            case x of
+                Just (nodeID, node, process) -> do 
+                    print "KILLED NODE"
+                    forkProcess node (nsendRemote nodeID "state" False)
+                    commandLoop backend nodes processes
+                    return ()
+                Nothing -> do 
+                    print "INVALID NODE SPECIFIED"
+                    commandLoop backend nodes processes
+                    return ()
+            
         _ -> do
             let 
                 nodeID = read command
