@@ -63,27 +63,31 @@ commandTests backend nodes processes = do
         mapM_ (\(_, (_, pid)) -> color Yellow (print pid)) dead
 
         -- Stop them
-        forkProcess testNode $ mapM_ ((`exit` "") . snd . snd) dead 
-        threadDelay 5000000
+        forkProcess testNode $ mapM_ (\(n, (_, _)) -> 
+            nsendRemote n "state" False) dead 
+        --threadDelay 2000000
 
         -- Send some messages
-        t <- (uniformR (1, 1) (randomGen) :: IO Int)
+        t <- (uniformR (1, 5) (randomGen) :: IO Int)
         forkProcess testNode $ forM_ [1..t] $ \i -> do
             r <- liftIO r'
             nsendRemote (fst $ Map.elemAt r live) "client" (Command $ show i)
-        threadDelay 5000000
+        threadDelay 2000000
         
         -- Restart them
-        l <- mapM (\(k, (n, _)) -> do
-                p <- forkProcess n $ initRaft backend nodes
-                return (k, (n, p))) dead
-        threadDelay 5000000
+        --l <- mapM (\(k, (n, _)) -> do
+        --        p <- forkProcess n $ initRaft backend nodes
+        --        return (k, (n, p))) dead
+        color Yellow $ print "Restarting..."
+        forkProcess testNode $ mapM_ (\(n, (_, _)) -> 
+            nsendRemote n "state" True) dead 
+        threadDelay 2000000
 
         -- Update map
-        let m' = Map.union (Map.fromList l) m
+        --let m' = Map.union (Map.fromList l) m
 
         -- Loop forever
-        loop m' randomGen testNode
+        loop m randomGen testNode
 
 -- | This thread starts a new election.
 sendCommandThread :: NodeId -> String -> Process ()
@@ -100,6 +104,7 @@ commandLoop backend nodes processes = do
 
 
     input <- getLine
+    print input
     let 
         args = words input
         command = args !! 0
@@ -111,9 +116,14 @@ commandLoop backend nodes processes = do
                 x = IntMap.lookup nodeID m
             case x of
                 Just (nodeID, node, process) -> do 
+                    print "INPUT RECEIVED"
                     forkProcess node (sendCommandThread nodeID command)
+                    commandLoop backend nodes processes
                     return ()
-                Nothing -> return ()
+                Nothing -> do 
+                    print "INVALID NODE SPECIFIED"
+                    commandLoop backend nodes processes
+                    return ()
             
         
 
@@ -167,7 +177,7 @@ initCluster host port numNodes = do
     --forkProcess testNode $ initRaft backend nodes 
     --threadDelay 1000000
     --forkProcess (nodes !! 0) $ initRaft backend nodes
-    commandTests backend nodes processes
+    --commandTests backend nodes processes
     
     commandLoop backend nodes processes
     -- Run until receive 'q' or Control C
