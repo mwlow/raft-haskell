@@ -97,7 +97,6 @@ sendCommandThread nodeID command = do
 commandLoop :: Backend -> [LocalNode] -> [ProcessId] -> IO ()
 commandLoop backend nodes processes = do
     -- Initialize state
-    testNode <- newLocalNode backend
     randomGen <- liftIO createSystemRandom
     let z = zip [0,1..] (zip3 (localNodeId <$> nodes) nodes processes)
         m = IntMap.fromList z
