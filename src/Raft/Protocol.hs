@@ -684,6 +684,11 @@ initRaft backend nodes identifier = do
     c <- newCluster backend nodes identifier
     mr <- liftIO . newMVar $ (newRaftState nodes :: RaftState String)
 
+    let fname = "tmp/" ++ show identifier ++ ".csv"
+        line  = "term,command"
+    liftIO $ withFile fname AppendMode $ \h -> do 
+        hPutStrLn h line >> hFlush h
+
     -- Start process for handling messages and register it
     raftPid <- spawnLocal $ raftThread c mr
     raftReg <- whereis "server"
