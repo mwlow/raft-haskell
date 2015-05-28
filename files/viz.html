@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>D3 Demo: Making a bar</title>
+  </head>
+<body>
+<script src="http://d3js.org/d3.v3.min.js"></script>
+<script src="http://code.jquery.com/jquery-latest.min.js" type="text/javascript"></script>
+<script>
+console.log("HEY");
+
+var svg = d3.select("body").append("svg");
+var width = $("svg").parent().width();
+var height = $("svg").parent().height();
+svg.attr("width", 1000)
+    .attr("height", 1000);
+var map = {};
+
+function color(term) {
+  term = (term % 5) +1;
+  switch(term) {
+    case 1:
+        return "red";
+    case 2:
+        return "blue";
+    case 3:
+        return "green";
+    case 4:
+        return "yellow";
+    case 5:
+        return "purple";
+    default:
+        return "black";
+  }
+}
+
+function displayData(rows, yOffset) {
+  console.log("Graphing chart");
+  console.log(rows);
+  console.log(yOffset);
+  map[yOffset] = rows;
+
+  var rectClass = ".rect"+yOffset;
+  var rows = svg.selectAll(rectClass)
+    .data(rows)
+    .enter()
+    .append("rect")
+    .attr("x", function(d, i) {
+            console.log("graphing" + i);
+            return (i*25 + 5);})
+    .attr("y", 25 * (yOffset+1))
+    .attr("width", 20)
+    .attr("height", 20)
+    .attr("class", function(d,i) {
+      var termClass = "term-"+d.term;
+      return termClass;
+    })
+    .classed(yOffset, true)
+    .attr("fill", function (d) {
+        return color(d.term);
+    });
+}
+
+function callURL(url, number) {
+  console.log(url);
+    d3.csv(url, function(loadedRows) {
+        rows = loadedRows;
+        //console.log("Pushing" + name);
+        displayData(rows, number);
+      });
+}
+
+function update() {
+  var exists = true;
+  for (var i = 0; i < 10; i++) {
+    var name = 0;
+    console.log("LOOP:"+name);
+    var url = "http://localhost:8000/" + name + ".csv";
+  /*  var name = 1;
+    var url = "http://localhost:8000/" + name + ".csv";
+    d3.csv(url, function(loadedRows) {
+        rows = loadedRows;
+        displayData(rows, 1);
+    });*/
+    $.ajax({
+      url:url,
+      type:"GET",
+      success: callURL(url, i) 
+    });
+  }
+}
+update();
+//setInterval(update, 5000);
+</script>
+</body>
+</html>
