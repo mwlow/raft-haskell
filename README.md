@@ -18,3 +18,5 @@ The number of nodes should be greater than 2.
 CSV files, one per node, will be written to the tmp directory. Each
 file contains the entries of the node's log that have been applied and thus represents
 the current state of the node's state machine.
+
+To verify correctness, after each run, compare the CSV files in the tmp directory to ensure that they are all the same. The automated test (i.e. `cabal run test [numNodes]`) will automatically call `diff` on all the CSV files.
