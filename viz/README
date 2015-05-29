@@ -12,5 +12,5 @@ Change that port to whichever you need it to. The visualization has only been te
 
 This is the URL to type into Firefox
 
-http://localhost:8000/files/viz.html
+http://localhost:8000/viz/viz.html
 
