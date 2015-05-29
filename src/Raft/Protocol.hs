@@ -7,11 +7,7 @@ module Raft.Protocol
 where
 
 import Prelude hiding (log)
-import System.Environment
-import System.Console.ANSI
 import System.Random.MWC
-import System.Exit
-import System.Posix.Signals
 import System.Directory
 import System.IO
 import Control.Concurrent
@@ -29,7 +25,6 @@ import Data.List
 import Data.Foldable (forM_)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
-import GHC.Generics (Generic)
 
 -- | Type renaming to make things clearer.
 type Term = Int
@@ -259,10 +254,10 @@ handleRequestVoteMsg c mr msg = do
         msg@(RequestVoteMsg sender term candidateId lastLogIndex lastLogTerm)
         | term > rCurrentTerm = handleMsg c (stepDown r term) msg
         | term < rCurrentTerm = return (r, (rCurrentTerm, False))
-        | rVotedFor `elem` [Nothing, Just candidateId] && 
-            (lastLogTerm > rLastLogTerm || 
-                (lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize)) =
-            return (r { votedFor = Just candidateId }, (term, True))
+        | rVotedFor `elem` [Nothing, Just candidateId]
+        , lastLogTerm > rLastLogTerm || 
+              lastLogTerm == rLastLogTerm && lastLogIndex >= rLogSize
+        = return (r { votedFor = Just candidateId }, (term, True))
         | otherwise = return (r, (rCurrentTerm, False))
       where
         rLog           = log r
@@ -286,8 +281,10 @@ handleRequestVoteResponseMsg c mr msg =
               -> IO (RaftState a)
     handleMsg c r msg@(RequestVoteResponseMsg sender term granted)
         | term > rCurrentTerm = handleMsg c (stepDown r term) msg
-        | rState == Candidate && rCurrentTerm == term && granted =
-            return r { voteCount = rVoteCount + 1 }
+        | rState == Candidate
+        , rCurrentTerm == term
+        , granted 
+        = return r { voteCount = rVoteCount + 1 }
         | otherwise = return r
       where
         rState         = state r
@@ -366,15 +363,16 @@ handleAppendEntriesResponseMsg c mr msg =
               -> IO (RaftState a)
     handleMsg c r msg@(AppendEntriesResponseMsg sender term matchIndex success)
         | term > rCurrentTerm = handleMsg c (stepDown r term) msg
-        | rState == Leader && rCurrentTerm == term =
-            if success
-                then return r { 
-                    matchIndexMap = Map.insert peer matchIndex rMatchIndexMap
-                  , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
-                  } 
-                else return r {
-                    nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
-                  }
+        | rState == Leader
+        , rCurrentTerm == term 
+        = if success
+              then return r { 
+                  matchIndexMap = Map.insert peer matchIndex rMatchIndexMap
+                , nextIndexMap = Map.insert peer (matchIndex + 1) rNextIndexMap
+                } 
+              else return r {
+                  nextIndexMap = Map.insert peer (max 1 $ rNextIndex - 1) rNextIndexMap
+                }
         | otherwise = return r
       where
         peer           = processNodeId sender
