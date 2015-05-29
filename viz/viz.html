@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>D3 Demo: Making a bar</title>
+    <title>Raft Visualization</title>
   </head>
 <body>
 <h6 id="command" style="position: fixed; top: 0px;">Hover over to see the commands</h6>
@@ -89,7 +89,7 @@ function displayData(rows, yOffset) {
     });
 
     d3.select("svg")
-      .attr("width", rows.length * (70));
+      .attr("width", (rows.length * (70))+200 );
 }
 
 function callURL(url, number) {
