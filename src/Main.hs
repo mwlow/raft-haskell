@@ -64,7 +64,7 @@ commandLoop backend nodes processes = do
                         color Red $ putStrLn "Error in input"
                         loop m testNode
             "quit":_ -> return ()
-            "send":index:command -> do
+            "send":index:command:_ -> do
                 let v = readMaybe index >>= \i -> IntMap.lookup i m
                 case v of
                     Just nID -> do
