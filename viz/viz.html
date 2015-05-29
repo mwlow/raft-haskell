@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>D3 Demo: Making a bar</title>
+  </head>
+<body>
+<h6 id="command">Hover over to see the commands</h6>
+<script src="http://d3js.org/d3.v3.min.js"></script>
+<script src="http://code.jquery.com/jquery-latest.min.js" type="text/javascript"></script>
+<script>
+var svg = d3.select("body").append("svg");
+svg.attr("width", 1000)
+    .attr("height", 1000);
+var map = {};
+
+for (var i = 0; i < 10; i++) {
+  svg.data([i])
+      .enter()
+      .append("text")
+      .attr("x",10)
+      .attr("y", (45 * (i+1))-2)
+      .attr("id", "command"+i)
+      .text("Latest Command:");
+}
+function color(term) {
+  term = (term % 5) +1;
+  switch(term) {
+    case 1:
+        return "red";
+    case 2:
+        return "blue";
+    case 3:
+        return "green";
+    case 4:
+        return "yellow";
+    case 5:
+        return "purple";
+    default:
+        return "black";
+  }
+}
+
+function displayData(rows, yOffset) {
+  map[yOffset] = rows;
+  if (rows != null) {
+    var textClass = ".text"+yOffset;
+    svg.selectAll(textClass).data([]).exit().remove();
+    var label = svg.selectAll(textClass)
+        .data([yOffset])
+        .enter()
+        .append("text")
+        .attr("x",0)
+        .attr("y", (45 * (yOffset+1))-2)
+        .attr("class", "text"+yOffset)
+        .text(yOffset);
+    var commandClass = ".command"+yOffset;
+    svg.selectAll(commandClass).data([]).exit().remove();
+    var command = svg.selectAll(commandClass)
+        .data([yOffset])
+        .enter()
+        .append("text")
+        .attr("x",12)
+        .attr("y", (45 * (yOffset+1))-2)
+        .attr("class", "command"+yOffset)
+        .text("Latest Command:" + rows[rows.length-1].command);
+  }
+  var rectClass = ".rect"+yOffset;
+  svg.selectAll(rectClass).data([]).exit().remove();
+  var svgRows = svg.selectAll(rectClass)
+    .data(rows)
+    .enter()
+    .append("rect")
+    .attr("x", function(d, i) {
+            return (i*25 + 15);})
+    .attr("y", 45 * (yOffset+1))
+    .attr("width", 20)
+    .attr("height", 20)
+    .attr("class", function(d,i) {
+      var termClass = "term-"+d.term;
+      return termClass;
+    })
+    .classed("rect"+yOffset, true)
+    .attr("fill", function (d) {
+        return color(d.term);
+    })
+    .on("mouseover", function(d) {
+      d3.select("#command").html(d.command);
+    });
+}
+
+function callURL(url, number) {
+  console.log(url);
+    d3.csv(url, function(loadedRows) {
+        rows = loadedRows;
+        //console.log("Pushing" + name);
+        displayData(rows, number);
+      });
+}
+
+function update() {
+  var exists = true;
+  //d3.select("svg").html("");
+  for (var i = 0; i < 10; i++) {
+    var name = i;
+    var url = "http://localhost:8000/tmp/" + name + ".csv";
+  /*  var name = 1;
+    var url = "http://localhost:8000/" + name + ".csv";
+    d3.csv(url, function(loadedRows) {
+        rows = loadedRows;
+        displayData(rows, 1);
+    });*/
+    $.ajax({
+      url:url,
+      type:"GET",
+      success: callURL(url, i) 
+    });
+  }
+}
+update();
+setInterval(update, 1000);
+</script>
+</body>
+</html>
