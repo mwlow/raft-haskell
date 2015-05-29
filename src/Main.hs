@@ -45,7 +45,9 @@ commandTest backend nodes = do
         color Cyan $ printf "%s %d/10\n" "==> Test" (z::Int)
 
         -- Select a random number of nodes to kill
-        n <- uniformR (1, l `div` 2) randomGen :: IO Int
+        n <- if odd l 
+                then uniformR (1, l `div` 2) randomGen :: IO Int
+                else uniformR (1, (l `div` 2) - 1) randomGen :: IO Int
         i <- nub <$> replicateM n r
         let dead = map (\i -> nodeIds !! i) i
             live = nodeIds \\ dead
@@ -209,17 +211,20 @@ main = do
     -- Parse command line arguments
     args <- getArgs
     case args of
-        [host, port, numNodes] ->
-            case readMaybe numNodes of
-                Nothing -> putStrLn "usage: raft host port numNodes"
-                -- Start the cluster
+        [host, port, numNodes] -> do
+            let i = readMaybe numNodes >>= \x -> guard (x > 2) >> return x
+            case i of
+                Nothing -> putStrLn "usage: raft host port [numNodes > 2]"
                 Just n -> initCluster host port n False
-        other -> if "test" `elem` other
-            then do
-                randomGen <- liftIO createSystemRandom
-                port <- uniformR (3000, 6000) randomGen :: IO Int
-                initCluster "localhost" (show port) 11 True
-            else putStrLn "usage: raft host port numNodes"
+        ["test", numNodes] -> do
+                let i = readMaybe numNodes >>= \x -> guard (x > 2) >> return x
+                case i of
+                    Nothing -> putStrLn "usage: raft test [numNodes > 2]"
+                    Just n -> do
+                        randomGen <- liftIO createSystemRandom
+                        port <- uniformR (3000, 6000) randomGen :: IO Int
+                        initCluster "localhost" (show port) n True
+        _ -> putStrLn "usage: raft host port [numNodes > 2]"
 
 
 
