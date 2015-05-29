@@ -8,15 +8,20 @@
 <script src="http://d3js.org/d3.v3.min.js"></script>
 <script src="http://code.jquery.com/jquery-latest.min.js" type="text/javascript"></script>
 <script>
-console.log("HEY");
-
 var svg = d3.select("body").append("svg");
-var width = $("svg").parent().width();
-var height = $("svg").parent().height();
 svg.attr("width", 1000)
     .attr("height", 1000);
 var map = {};
 
+for (var i = 0; i < 10; i++) {
+  svg.data([i])
+      .enter()
+      .append("text")
+      .attr("x",10)
+      .attr("y", (45 * (i+1))-2)
+      .attr("id", "command"+i)
+      .text("Latest Command:");
+}
 function color(term) {
   term = (term % 5) +1;
   switch(term) {
@@ -36,36 +41,45 @@ function color(term) {
 }
 
 function displayData(rows, yOffset) {
-  console.log("Graphing chart" + yOffset);
-  console.log(rows);
-  console.log(yOffset);
   map[yOffset] = rows;
   if (rows != null) {
     var textClass = ".text"+yOffset;
+    svg.selectAll(textClass).data([]).exit().remove();
     var label = svg.selectAll(textClass)
         .data([yOffset])
         .enter()
         .append("text")
         .attr("x",0)
-        .attr("y", (25 * (yOffset+1))+14)
+        .attr("y", (45 * (yOffset+1))-2)
+        .attr("class", "text"+yOffset)
         .text(yOffset);
+    var commandClass = ".command"+yOffset;
+    svg.selectAll(commandClass).data([]).exit().remove();
+    var command = svg.selectAll(commandClass)
+        .data([yOffset])
+        .enter()
+        .append("text")
+        .attr("x",12)
+        .attr("y", (45 * (yOffset+1))-2)
+        .attr("class", "command"+yOffset)
+        .text("Latest Command:" + rows[rows.length-1].command);
   }
   var rectClass = ".rect"+yOffset;
+  svg.selectAll(rectClass).data([]).exit().remove();
   var svgRows = svg.selectAll(rectClass)
     .data(rows)
     .enter()
     .append("rect")
     .attr("x", function(d, i) {
-            console.log("graphing" + i);
             return (i*25 + 15);})
-    .attr("y", 25 * (yOffset+1))
+    .attr("y", 45 * (yOffset+1))
     .attr("width", 20)
     .attr("height", 20)
     .attr("class", function(d,i) {
       var termClass = "term-"+d.term;
       return termClass;
     })
-    .classed(yOffset, true)
+    .classed("rect"+yOffset, true)
     .attr("fill", function (d) {
         return color(d.term);
     });
@@ -82,9 +96,9 @@ function callURL(url, number) {
 
 function update() {
   var exists = true;
+  //d3.select("svg").html("");
   for (var i = 0; i < 10; i++) {
     var name = i;
-    console.log("LOOP:"+name);
     var url = "http://localhost:8000/tmp/" + name + ".csv";
   /*  var name = 1;
     var url = "http://localhost:8000/" + name + ".csv";
@@ -100,7 +114,7 @@ function update() {
   }
 }
 update();
-setInterval(update, 2000);
+setInterval(update, 3000);
 </script>
 </body>
 </html>
