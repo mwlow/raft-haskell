@@ -1,0 +1,6 @@
+[submodule "sources/cloud-haskell"]
+	path = sources/cloud-haskell
+	url = git@github.com:haskell-distributed/cloud-haskell.git
+[submodule "sources/distributed-process-simplelocalnet"]
+	path = sources/distributed-process-simplelocalnet
+	url = git@github.com:haskell-distributed/distributed-process-simplelocalnet.git

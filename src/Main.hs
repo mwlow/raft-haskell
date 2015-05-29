@@ -1,12 +1,10 @@
 import System.Environment
 import System.IO
 import System.Console.ANSI
---import System.Exit
---import System.Posix.Signals
 import System.Random.MWC
 import System.Directory
 import Control.Concurrent 
-import Control.Monad 
+import Control.Monad
 import Control.Applicative
 import Control.Distributed.Process
 import Control.Distributed.Process.Node hiding (newLocalNode)
@@ -18,6 +16,7 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.List
 import Text.Read
 import Text.Printf
+import Safe
 
 import Raft.Protocol
 import Test
@@ -66,12 +65,12 @@ commandLoop backend nodes processes = do
                         color Red $ putStrLn "Error in input"
                         loop m testNode
             "quit":_ -> return ()
-            "send":index:command -> do
-                let v = readMaybe index >>= \i -> IntMap.lookup i m
+            "send":index:c -> do
+                let v = headMay c >> readMaybe index >>= \i -> IntMap.lookup i m
                 case v of
                     Just nID -> do
                         runProcess testNode $ 
-                            nsendRemote nID "client" (Command $ unwords command)
+                            nsendRemote nID "client" (Command $ unwords c)
                         putStrLn $ "Sending message to " ++ show nID
                         loop m testNode
                     Nothing  -> do
@@ -108,12 +107,12 @@ initCluster host port numNodes = do
     putStrLn "kill [nid]         -- Put a node to sleep"
     putStrLn "wake [nid]         -- Wake up the node"
     putStrLn "send [nid] command -- Send a node a message to replicate"
-    putStrLn "quit               -- Exit"
+    color Magenta $ putStrLn "quit               -- Exit"
     putStrLn ""
     putStrLn "Example: kill 0"
     putStrLn "         send 1 write me to /tmp"
     putStrLn "         wake 0"
-    putStrLn "         quit"
+    color Magenta $ putStrLn "         quit"
     putStrLn ""
     putStrLn "I will currently fail if you kill a majority of nodes!"
     putStrLn ""
