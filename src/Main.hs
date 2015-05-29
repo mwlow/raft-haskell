@@ -16,6 +16,7 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.List
 import Text.Read
 import Text.Printf
+import Safe
 
 import Raft.Protocol
 import Test
@@ -64,12 +65,12 @@ commandLoop backend nodes processes = do
                         color Red $ putStrLn "Error in input"
                         loop m testNode
             "quit":_ -> return ()
-            "send":index:command:_ -> do
-                let v = readMaybe index >>= \i -> IntMap.lookup i m
+            "send":index:c -> do
+                let v = headMay c >> readMaybe index >>= \i -> IntMap.lookup i m
                 case v of
                     Just nID -> do
                         runProcess testNode $ 
-                            nsendRemote nID "client" (Command $ unwords command)
+                            nsendRemote nID "client" (Command $ unwords c)
                         putStrLn $ "Sending message to " ++ show nID
                         loop m testNode
                     Nothing  -> do
