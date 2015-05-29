@@ -10,9 +10,10 @@ Build the program via `sh install.sh`, which will first install all
 dependencies into a sandbox located in the root directory of the
 repository. To run, either:
 
-* `cabal run test` to run a randomized test case.
-* `cabal run localhost [port] [numNodes]` to interact manually with Raft. `[numNodes]`
-should be odd.
+* `cabal run test [numNodes]` to run a randomized test case.
+* `cabal run localhost [port] [numNodes]` to interact manually with Raft.
+
+The number of nodes should be greater than 2.
 
 CSV files, one per node, will be written to the tmp directory. Each
 file contains the entries of the node's log that have been applied and thus represents
