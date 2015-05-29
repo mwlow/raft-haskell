@@ -3,6 +3,9 @@
 color=`tput setaf 4`
 reset=`tput sgr0`
 
+echo "${color}==> Updating cabal${reset}"
+cabal update
+
 echo "${color}==> Creating sandbox${reset}"
 cabal sandbox init
 
