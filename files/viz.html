@@ -36,19 +36,28 @@ function color(term) {
 }
 
 function displayData(rows, yOffset) {
-  console.log("Graphing chart");
+  console.log("Graphing chart" + yOffset);
   console.log(rows);
   console.log(yOffset);
   map[yOffset] = rows;
-
+  if (rows != null) {
+    var textClass = ".text"+yOffset;
+    var label = svg.selectAll(textClass)
+        .data([yOffset])
+        .enter()
+        .append("text")
+        .attr("x",0)
+        .attr("y", (25 * (yOffset+1))+14)
+        .text(yOffset);
+  }
   var rectClass = ".rect"+yOffset;
-  var rows = svg.selectAll(rectClass)
+  var svgRows = svg.selectAll(rectClass)
     .data(rows)
     .enter()
     .append("rect")
     .attr("x", function(d, i) {
             console.log("graphing" + i);
-            return (i*25 + 5);})
+            return (i*25 + 15);})
     .attr("y", 25 * (yOffset+1))
     .attr("width", 20)
     .attr("height", 20)
@@ -74,9 +83,9 @@ function callURL(url, number) {
 function update() {
   var exists = true;
   for (var i = 0; i < 10; i++) {
-    var name = 0;
+    var name = i;
     console.log("LOOP:"+name);
-    var url = "http://localhost:8000/" + name + ".csv";
+    var url = "http://localhost:8000/tmp/" + name + ".csv";
   /*  var name = 1;
     var url = "http://localhost:8000/" + name + ".csv";
     d3.csv(url, function(loadedRows) {
@@ -91,7 +100,7 @@ function update() {
   }
 }
 update();
-//setInterval(update, 5000);
+setInterval(update, 2000);
 </script>
 </body>
 </html>
