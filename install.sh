@@ -11,7 +11,8 @@ git submodule init
 git submodule update
 
 echo "${color}==> Installing dependencies${reset}"
-cabal install sources/cloud-haskell sources/distributed-process-simplelocalnet/
+cabal sandbox add-source sources/cloud-haskell
+cabal sandbox add-source sources/distributed-process-simplelocalnet
 cabal install --only-dependencies
 
 echo "${color}==> Building${reset}"
