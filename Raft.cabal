@@ -28,7 +28,8 @@ executable Raft
                        ansi-terminal <= 0.6.2.1,
                        mwc-random <= 0.13.3.2, 
                        directory <= 1.2.1.0,
-                       safe <= 0.3.9
+                       safe <= 0.3.9,
+                       process <= 1.2.0.0
   hs-source-dirs:      src
   ghc-options:         -O2
   default-language:    Haskell2010
