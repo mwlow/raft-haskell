@@ -87,6 +87,10 @@ function displayData(rows, yOffset) {
     .on("mouseover", function(d) {
       d3.select("#command").html(d.command);
     });
+    console.log("CHANGING SVG");
+
+    d3.select("svg")
+      .attr("width", rows.length * (70));
 }
 
 function callURL(url, number) {
